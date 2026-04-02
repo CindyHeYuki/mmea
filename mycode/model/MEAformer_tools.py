@@ -33,15 +33,27 @@ class MformerFusion(nn.Module):
         # self.type_embedding = nn.Embedding(args.inner_view_num, args.hidden_size)
         self.type_id = torch.tensor([0, 1, 2, 3, 4, 5]).cuda()
 
-    def forward(self, embs):
-        embs = [embs[idx] for idx in range(len(embs)) if embs[idx] is not None]
+    def forward(self, embs,causal_bias=None):
+        # 记录有效模态的索引，保证 causal_bias 和实际传入的模态对齐
+        valid_indices = [idx for idx in range(len(embs)) if embs[idx] is not None]
+        embs = [embs[idx] for idx in valid_indices]
+        # embs = [embs[idx] for idx in range(len(embs)) if embs[idx] is not None]
         modal_num = len(embs)
+        
+        # 过滤掉 None 模态对应的 bias
+        if causal_bias is not None:
+            causal_bias = causal_bias[valid_indices]
+        
 
         hidden_states = torch.stack(embs, dim=1)
         bs = hidden_states.shape[0]
         for i, layer_module in enumerate(self.fusion_layer):
-            layer_outputs = layer_module(hidden_states, output_attentions=True)
+            # 将 causal_bias 传给每一层
+            layer_outputs = layer_module(hidden_states, output_attentions=True, causal_bias=causal_bias)
             hidden_states = layer_outputs[0]
+            
+            # layer_outputs = layer_module(hidden_states, output_attentions=True)
+            # hidden_states = layer_outputs[0]
         # torch.Size([30355, 5, 4, 4])
         # attention_pro = layer_outputs[1]
         # torch.Size([30355, 4, 4])
@@ -115,6 +127,7 @@ class MultiModalEncoder(nn.Module):
         self.fusion = MformerFusion(args, modal_num=self.args.inner_view_num,
                                     with_weight=self.args.with_weight)
 
+    # 在 MultiModalEncoder.forward 的参数列表最后加上 causal_bias=None
     def forward(self,
                 input_idx,
                 adj,
@@ -122,7 +135,8 @@ class MultiModalEncoder(nn.Module):
                 rel_features=None,
                 att_features=None,
                 name_features=None,
-                char_features=None):
+                char_features=None,
+                causal_bias=None):
 
         if self.args.w_gcn:
             gph_emb = self.cross_graph_model(self.entity_emb(input_idx), adj)
@@ -148,8 +162,13 @@ class MultiModalEncoder(nn.Module):
             char_emb = self.char_fc(char_features)
         else:
             char_emb = None
+            
+        # 注意这里的模态顺序必须固定，与后续在 MEAformer 中生成的 bias 顺序完全一致
+        emb_list = [img_emb, att_emb, rel_emb, gph_emb, name_emb, char_emb]
+        # 将 emb_list 和 causal_bias 传给 fusion
+        joint_emb, hidden_states, weight_norm = self.fusion(emb_list, causal_bias=causal_bias)
 
-        joint_emb, hidden_states, weight_norm = self.fusion([img_emb, att_emb, rel_emb, gph_emb, name_emb, char_emb])
+        # joint_emb, hidden_states, weight_norm = self.fusion([img_emb, att_emb, rel_emb, gph_emb, name_emb, char_emb])
 
         return gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states, weight_norm
 
@@ -178,6 +197,7 @@ class BertSelfAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         output_attentions=False,
+        causal_bias=None,  # 新增因果偏置参数
     ):
         mixed_query_layer = self.query(hidden_states)
         # [8, 3, 8, 256]
@@ -190,6 +210,13 @@ class BertSelfAttention(nn.Module):
         # # [8, 3, 8, 8]
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        
+        # ====== 核心：注入动态因果偏置项 (公式 19) ======
+        if causal_bias is not None:
+            # causal_bias 形状为 [modal_num]，通过 view 广播到 [bs, num_heads, modal_num, modal_num]
+            # 加在 key 的维度上，表示分配给对应模态 j 的偏置
+            attention_scores = attention_scores + causal_bias.view(1, 1, 1, -1)
+        # ===============================================
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.functional.softmax(attention_scores, dim=-1)
@@ -232,10 +259,12 @@ class BertAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         output_attentions=False,
+        causal_bias=None
     ):
         self_outputs = self.self(
             hidden_states,
             output_attentions,
+            causal_bias=causal_bias,
         )
 
         attention_output = self.output(self_outputs[0], hidden_states)
@@ -282,10 +311,11 @@ class BertLayer(nn.Module):
             self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
 
-    def forward(self, hidden_states: torch.Tensor, output_attentions=False):
+    def forward(self, hidden_states: torch.Tensor, output_attentions=False,causal_bias=None):
         self_attention_outputs = self.attention(
             hidden_states,
             output_attentions=output_attentions,
+            causal_bias=causal_bias,
         )
         if not self.config.use_intermediate:
             return (self_attention_outputs[0], self_attention_outputs[1])

@@ -41,6 +41,18 @@ class cfg():
                     help="结构稀疏度权重（0-1），用于计算样本难度：λ·ρ_struct + (1-λ)·ρ_modal")
         #end new 1
 
+        # ====== 新增：模块二 动态因果效应加权机制参数 ======
+        parser.add_argument("--use_causal_bias", default=1, type=int, choices=[0, 1],
+                    help="消融实验开关：是否启用动态因果加权机制 (1: 开启, 0: 关闭)")
+        parser.add_argument("--causal_lambda", default=1.0, type=float,
+                    help="公式中的 λ：因果引导偏置项的整体强度")
+        parser.add_argument("--causal_gamma", default=0.9, type=float,
+                    help="计算瞬时因果效应 D_j 的滑动平均因子 (平滑因子)")
+        parser.add_argument("--causal_beta", default=0.5, type=float,
+                    help="计算固有因果置信度 C_j 的历史衰减因子 β")
+        parser.add_argument("--causal_eval_k", default=10, type=int,
+                    help="每 K 个 epoch 评估一次固有因果置信度 C_j")
+        # ===================================================
 
 
         # TODO: add some dynamic variable

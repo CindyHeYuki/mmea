@@ -54,12 +54,23 @@ class MEAformer(nn.Module):
         self.idx_double = torch.cat([self.idx_one, self.idx_one]).cuda()
         self.last_num = 1000000000000
         # self.idx_one = np.ones(self.args.batch_size, dtype=np.int64)
+        
+        # ====== 新增：因果信号状态维护 ======
+        # 严格对应 Encoder 里的顺序: [img, att, rel, gph, name, char]
+        self.modal_names = ['img', 'att', 'rel', 'gph', 'name', 'char']
+        
+        # D_j: 瞬时因果效应 (梯度范数滑动平均)，初始化为 0
+        self.causal_Dj = {m: 0.0 for m in self.modal_names}
+        
+        # C_j: 固有因果置信度，初始化为一个中等偏上的先验值 (如 0.5)
+        self.causal_Cj = {m: 0.5 for m in self.modal_names}
+        # ====================================
 
 
 
-    def forward(self, input_batch):
+    def forward(self, input_batch, epoch=0, total_epochs=1):
         # 生成所有实体和隐藏层嵌入 (必须在最前面，为了后面统一获取 Device)
-        gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states = self.joint_emb_generat(only_joint=False)
+        gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states = self.joint_emb_generat(only_joint=False, epoch=epoch, total_epochs=total_epochs)
         gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, joint_emb_hid = self.generate_hidden_emb(hidden_states)
 
         # 动态获取所在设备，避免硬编码 .cuda() 或未定义的 self.device
@@ -326,15 +337,28 @@ class MEAformer(nn.Module):
 
     # --------- necessary ---------------
 
-    def joint_emb_generat(self, only_joint=True):
+    def joint_emb_generat(self, only_joint=True, epoch=0, total_epochs=1):
+        # 计算因果偏置
+        causal_bias = self._compute_causal_bias(epoch, total_epochs)
         gph_emb, img_emb, rel_emb, att_emb, \
-            name_emb, char_emb, joint_emb, hidden_states, weight_norm = self.multimodal_encoder(self.input_idx,
-                                                                                                self.adj,
-                                                                                                self.img_features,
-                                                                                                self.rel_features,
-                                                                                                self.att_features,
-                                                                                                self.name_features,
-                                                                                                self.char_features)
+            name_emb, char_emb, joint_emb, hidden_states, weight_norm = self.multimodal_encoder(
+                self.input_idx, self.adj, self.img_features, self.rel_features, 
+                self.att_features, self.name_features, self.char_features,
+                causal_bias=causal_bias # 传入偏置
+            )
+        # 绑定梯度捕获 (只在重新生成嵌入时挂载 Hook)
+        embs_dict = {'img': img_emb, 'att': att_emb, 'rel': rel_emb, 
+                     'gph': gph_emb, 'name': name_emb, 'char': char_emb}
+        self._register_grad_hooks(embs_dict)
+        
+        # gph_emb, img_emb, rel_emb, att_emb, \
+        #     name_emb, char_emb, joint_emb, hidden_states, weight_norm = self.multimodal_encoder(self.input_idx,
+        #                                                                                         self.adj,
+        #                                                                                         self.img_features,
+        #                                                                                         self.rel_features,
+        #                                                                                         self.att_features,
+        #                                                                                         self.name_features,
+        #                                                                                         self.char_features)
         if only_joint:
             return joint_emb, weight_norm
         else:
@@ -389,3 +413,53 @@ class MEAformer(nn.Module):
             logger.info("len(new_links) is 0")
 
         return left_non_train, right_non_train, train_ill, new_links
+    
+    
+    def _compute_causal_bias(self, epoch, total_epochs):
+        if not self.args.use_causal_bias or not self.training:
+            return None
+            
+        # (1) 进度信号 α (公式 9)
+        alpha = epoch / total_epochs
+        
+        # 难度惩罚与低置信度惩罚权重函数 (公式 17 的动态权重)
+        w_D = 1.0 - alpha  # 随训练递减，早期抑制瞬时剧烈变化
+        w_C = alpha        # 随训练递增，晚期抑制低置信度模态
+        
+        biases = []
+        for m in self.modal_names:
+            # (2) 计算偏置 Bias_j (公式 16 对应的惩罚逻辑)
+            # Bias 为负值，起到惩罚作用
+            bias_j = - (w_D * self.causal_Dj[m] + w_C * (1.0 - self.causal_Cj[m]))
+            biases.append(bias_j)
+            
+        # 转换为 Tensor，并乘以超参数 λ
+        causal_bias = torch.tensor(biases, dtype=torch.float32, device=self.args.device) * self.args.causal_lambda
+        return causal_bias
+
+    def _register_grad_hooks(self, embs_dict):
+        """利用 Hook 在反向传播时自动捕获并更新 D_j"""
+        if not self.training or not self.args.use_causal_bias:
+            return
+            
+        for name, emb in embs_dict.items():
+            if emb is not None and emb.requires_grad:
+                # 注册 Hook，当当前模态的 embedding 计算出梯度时回调
+                emb.register_hook(lambda grad, n=name: self._update_Dj(n, grad))
+
+    def _update_Dj(self, modal_name, grad):
+        """(2) 模态瞬时因果效应信号更新 (公式 11)"""
+        grad_norm = grad.norm(2).item()
+        gamma = self.args.causal_gamma
+        # 滑动平均更新 D_j
+        self.causal_Dj[modal_name] = gamma * self.causal_Dj[modal_name] + (1 - gamma) * grad_norm
+        
+    def update_Cj(self, modal_hits_dict):
+        """
+        (3) 模态固有因果置信度更新 (外部验证集触发调用) (公式 14)
+        modal_hits_dict 格式如: {'img': 0.65, 'gph': 0.82, ...}
+        """
+        beta = self.args.causal_beta
+        for m, hits_score in modal_hits_dict.items():
+            if m in self.causal_Cj:
+                self.causal_Cj[m] = beta * hits_score + (1 - beta) * self.causal_Cj[m]

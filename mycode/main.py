@@ -227,6 +227,16 @@ class Runner:
                 self.update_loss_log()
                 if (i + 1) % self.args.eval_epoch == 0:
                     self.eval()
+                # ====== 在这里紧接着插入新增的定期评估 C_j 代码 ======
+                if self.args.use_causal_bias and (i + 1) % self.args.causal_eval_k == 0:
+                    # 提示：由于分别评估单个模态需要阻断其他模态，为简化代码并提升训练效率，
+                    # 这里你可以选择传入上一轮的独立指标，或者调用一个单独的评估函数 self.eval_single_modal()
+                    # 假定返回的是各个模态的 hits@1 字典，例如:
+                    # mock_hits_dict = {'img': 0.6, 'att': 0.7, 'rel': 0.5, 'gph': 0.8, 'name': 0.9, 'char': 0.85}
+                    # self.model.module.update_Cj(mock_hits_dict) if self.args.dist else self.model.update_Cj(mock_hits_dict)
+                    pass
+                # =======================================================
+                
                 _tqdm.update(1)
                 if self.stage == 1 and self.early_stop_count <= 0:
                     logger.info(f"Early stop in epoch {self.epoch}")
@@ -295,9 +305,12 @@ class Runner:
                     continue
                 # ====== 使用筛选后的样本训练 ======
                 selected_batch = np.column_stack((selected_ent1, selected_ent2))
-                loss, output = self.model(selected_batch)
+                # 修改此行，传入 epoch 和总 epoch
+                loss, output = self.model(selected_batch, epoch=self.epoch, total_epochs=self.args.epoch)
+                # loss, output = self.model(selected_batch)
             else:  # 测试批次没有难度信息
-                loss, output = self.model(batch_dict)
+                # loss, output = self.model(batch_dict)
+                loss, output = self.model(batch_dict, epoch=self.epoch, total_epochs=self.args.epoch)
 
             #loss, output = self.model(batch)
             loss = loss / accumulation_steps
