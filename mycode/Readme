@@ -1,1 +1,35 @@
 服务器常用指令
+
+nvidia-smi
+gpustat -cp
+
+想一次性看所有正在跑 python 程序的所有进程
+ps -ef | grep python
+
+ps -f -p <那个PID>
+
+创建进程组
+set -m
+CUDA_VISIBLE_DEVICES=3 nohup bash run_gpu3.sh > nohup_gpu2.out 2>&1 &
+CUDA_VISIBLE_DEVICES=3 nohup bash run_gpu3.sh > nohup_gpu3.out 2>&1 &
+
+
+停止
+kill -9 -$!
+
+
+
+参数实验和消融实验相关
+
+在 config.py 中，我们为这两个创新点设计了以下参数：
+创新点一：样本调度（课程学习）
+--k: 调度速度系数（默认 0.5）。控制样本引入的速度。
+--lambda_val: 难度计算中结构稀疏度的权重（默认 0.2）。
+
+创新点二：动态因果效应加权
+--use_causal_bias: 消融实验核心开关。设为 1 开启因果加权，设为 0 关闭（退化为普通的多头注意力）。
+--causal_lambda: 论文公式(19)中的 $\lambda$。控制因果偏置项对最终注意力得分的整体影响强度（默认 1.0）。
+--causal_gamma: 论文公式(11)中的平滑因子。控制瞬时因果效应 $D_j$ 的滑动平均（默认 0.9）。
+--causal_beta: 论文公式(14)中的历史衰减因子 $\beta$。控制固有因果置信度 $C_j$ 的更新（默认 0.5）。
+--causal_eval_k: 论文中的 $K$。控制每隔多少个 epoch 评估一次固有因果置信度（默认 10）。
+
