@@ -54,6 +54,13 @@ class cfg():
                     help="每 K 个 epoch 评估一次固有因果置信度 C_j")
         # ===================================================
 
+        # ====== 新增：模块三 反事实平滑约束参数 ======
+        parser.add_argument("--use_csc", default=1, type=int, choices=[0, 1], help="是否启用反事实平滑约束")
+        parser.add_argument("--csc_lambda_0", default=1.0, type=float, help="初始平滑强度 lambda_0")
+        parser.add_argument("--csc_eta", default=5.0, type=float, help="衰减速率控制参数 eta")
+        parser.add_argument("--csc_gamma", default=0.1, type=float, help="反事实对比的间隔 Margin")
+        # =============================================
+
 
         # TODO: add some dynamic variable
         parser.add_argument("--model_name", default="MEAformer", type=str, choices=["EVA", "MCLEA", "MSNEA", "MEAformer"], help="model name")

@@ -33,25 +33,25 @@ echo "所有日志将保存在: ${LOG_DIR}"
 # echo "Running FBYG15K norm 0.2 wo_surf..."
 # bash run_meaformer.sh 3 FBYG15K norm 0.2 0 > ${LOG_DIR}/FBYG15K_norm_0.2_wo_surf.log 2>&1
 
-# DBP15K (w/o surface)
+# # DBP15K (w/o surface)
 echo "Running DBP15K zh_en 0.3 wo_surf..."
-bash run_meaformer.sh 3 DBP15K zh_en 0.3 0 > ${LOG_DIR}/DBP15K_zh_en_0.3_wo_surf.log 2>&1
+bash run_meaformer.sh 1 DBP15K zh_en 0.3 0 > ${LOG_DIR}/DBP15K_zh_en_0.3_wo_surf.log 2>&1
 
-echo "Running DBP15K ja_en 0.3 wo_surf..."
-bash run_meaformer.sh 3 DBP15K ja_en 0.3 0 > ${LOG_DIR}/DBP15K_ja_en_0.3_wo_surf.log 2>&1
+# echo "Running DBP15K ja_en 0.3 wo_surf..."
+# bash run_meaformer.sh 3 DBP15K ja_en 0.3 0 > ${LOG_DIR}/DBP15K_ja_en_0.3_wo_surf.log 2>&1
 
-echo "Running DBP15K fr_en 0.3 wo_surf..."
-bash run_meaformer.sh 3 DBP15K fr_en 0.3 0 > ${LOG_DIR}/DBP15K_fr_en_0.3_wo_surf.log 2>&1
+# echo "Running DBP15K fr_en 0.3 wo_surf..."
+# bash run_meaformer.sh 3 DBP15K fr_en 0.3 0 > ${LOG_DIR}/DBP15K_fr_en_0.3_wo_surf.log 2>&1
 
 # # w/ surface
 # DBP15K (w/ surface)
-echo "Running DBP15K zh_en 0.3 w_surf..."
-bash run_meaformer.sh 3 DBP15K zh_en 0.3 1 > ${LOG_DIR}/DBP15K_zh_en_0.3_w_surf.log 2>&1
+# echo "Running DBP15K zh_en 0.3 w_surf..."
+# bash run_meaformer.sh 3 DBP15K zh_en 0.3 1 > ${LOG_DIR}/DBP15K_zh_en_0.3_w_surf.log 2>&1
 
-echo "Running DBP15K ja_en 0.3 w_surf..."
-bash run_meaformer.sh 3 DBP15K ja_en 0.3 1 > ${LOG_DIR}/DBP15K_ja_en_0.3_w_surf.log 2>&1
+# echo "Running DBP15K ja_en 0.3 w_surf..."
+# bash run_meaformer.sh 3 DBP15K ja_en 0.3 1 > ${LOG_DIR}/DBP15K_ja_en_0.3_w_surf.log 2>&1
 
-echo "Running DBP15K fr_en 0.3 w_surf..."
-bash run_meaformer.sh 3 DBP15K fr_en 0.3 1 > ${LOG_DIR}/DBP15K_fr_en_0.3_w_surf.log 2>&1
+# echo "Running DBP15K fr_en 0.3 w_surf..."
+# bash run_meaformer.sh 3 DBP15K fr_en 0.3 1 > ${LOG_DIR}/DBP15K_fr_en_0.3_w_surf.log 2>&1
 
 echo "===== 本批次实验全部完成 ====="

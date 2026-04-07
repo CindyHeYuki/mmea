@@ -66,11 +66,59 @@ class MEAformer(nn.Module):
         self.causal_Cj = {m: 0.5 for m in self.modal_names}
         # ====================================
 
+        # 假设实体的总数是 ent_num，模态数是 modal_num (例如 6)
+        # modal_num = len(self.modal_names)
+        # # 初始化均匀权重，并使用 register_buffer 确保它不参与梯度计算，但能随模型保存
+        # self.register_buffer('alpha_prev', torch.ones(args.ent_num, modal_num) / modal_num)
+
+
+    
+
+    # def compute_csc_loss(self, input_idx, embs_list, joint_emb_factual, alpha_t, epoch, total_epochs):
+    #     # embs_list: 融合前的模态表示列表 X 
+    #     # joint_emb_factual: 当前步计算出的事实状态表征 z_v_i [cite: 80, 82]
+    #     # alpha_t: 当前步的融合权重 
+        
+    #     batch_size = joint_emb_factual.size(0)
+    #     modal_num = len(embs_list)
+        
+    #     # 堆叠各个模态特征: shape [batch_size, modal_num, hidden_size]
+    #     X = torch.stack(embs_list, dim=1) 
+        
+    #     # --- (2) 正向反事实干预：时序平稳 z_prev_v_i ---
+    #     # 获取历史权重，并使用 detach() 实施因果干预，阻断当前梯度对历史权重的更新 [cite: 87, 88]
+    #     alpha_prev_batch = self.alpha_prev[input_idx].detach() 
+    #     # 计算历史权重下的加权融合表征
+    #     z_prev = torch.sum(alpha_prev_batch.unsqueeze(-1) * X, dim=1) 
+
+    #     # --- (3) 负向反事实干预：因果盲目 z_uni_v_i ---
+    #     # 强制进行均匀融合 [cite: 90, 93]
+    #     z_uni = torch.mean(X, dim=1) 
+
+    #     # --- (4) 计算基于间隔的反事实对比损失 ---
+    #     # 采用余弦距离: distance = 1 - cosine_similarity [cite: 95, 96, 97]
+    #     d_pos = 1.0 - F.cosine_similarity(joint_emb_factual, z_prev, dim=-1)
+    #     d_neg = 1.0 - F.cosine_similarity(joint_emb_factual, z_uni, dim=-1)
+        
+    #     # max(0, d_pos - d_neg + gamma) [cite: 98, 99]
+    #     margin = self.args.csc_gamma
+    #     loss_csc = torch.clamp(d_pos - d_neg + margin, min=0.0).mean()
+
+    #     # --- (5) 计算时间衰减系数 ---
+    #     # lambda_t = lambda_0 * exp(-eta * t / T) [cite: 101, 102]
+    #     lambda_t = self.args.csc_lambda_0 * math.exp(-self.args.csc_eta * (epoch / total_epochs))
+
+    #     # --- 更新历史权重 ---
+    #     # 使用当前步的权重更新 buffer（动量更新或直接替换均可，此处为直接替换以吻合论文"上一训练步骤"的设定）
+    #     self.alpha_prev[input_idx] = alpha_t.detach()
+
+    #     return lambda_t * loss_csc
 
 
     def forward(self, input_batch, epoch=0, total_epochs=1):
         # 生成所有实体和隐藏层嵌入 (必须在最前面，为了后面统一获取 Device)
-        gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states = self.joint_emb_generat(only_joint=False, epoch=epoch, total_epochs=total_epochs)
+        gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states, weight_norm = self.joint_emb_generat(only_joint=False, epoch=epoch, total_epochs=total_epochs)
+        # gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states = self.joint_emb_generat(only_joint=False, epoch=epoch, total_epochs=total_epochs)
         gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, joint_emb_hid = self.generate_hidden_emb(hidden_states)
 
         # 动态获取所在设备，避免硬编码 .cuda() 或未定义的 self.device
@@ -140,12 +188,44 @@ class MEAformer(nn.Module):
             in_loss = self.inner_view_loss(gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, batch_tensor)
             out_loss = self.inner_view_loss(gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, batch_tensor)
         
+
         # 总损失
         loss_all = loss_joi + in_loss + out_loss
-        
-        # 准备输出
         loss_dic = {"joint_Intra_modal": loss_joi.item(), "Intra_modal": in_loss.item()}
         output = {"loss_dic": loss_dic, "emb": joint_emb}
+
+        # if self.args.use_csc and self.training:
+        #     # 你需要透传 input_batch_idx (实体的绝对索引)，用于去 buffer 里拿历史权重
+        #     loss_csc = self.compute_csc_loss(input_idx, embs_list, joint_emb, weight_norm, epoch, total_epochs)
+        #     loss_all = loss_all + loss_csc
+        #     # 记录到字典输出给 Tensorboard
+        #     output["loss_dic"]["CSC_Loss"] = loss_csc.item() 
+        # ====== 新增：构造 CSC 模块需要的输入 ======
+        if self.args.use_csc and self.training:
+            # 1. 打包 embs_list (注意顺序必须和 Encoder 里一致)
+            embs_list = [img_emb, att_emb, rel_emb, gph_emb, name_emb, char_emb]
+            
+            # 2. 获取所有实体的索引
+            input_idx = self.input_idx
+            
+            # 3. 计算反事实约束 Loss (传入打包好的变量)
+            loss_csc = self.compute_csc_loss(input_idx, embs_list, joint_emb, weight_norm, epoch, total_epochs)
+            
+            # 4. 叠加 Loss 并记录
+            loss_all = loss_all + loss_csc
+            output["loss_dic"]["CSC_Loss"] = loss_csc.item()
+        # ==========================================
+
+        
+        # # 准备输出
+        # loss_dic = {"joint_Intra_modal": loss_joi.item(), "Intra_modal": in_loss.item()}
+        # output = {"loss_dic": loss_dic, "emb": joint_emb}
+
+        # ====== 新增：把因果参数传给主循环监控 ======
+        if self.args.use_causal_bias and hasattr(self, 'current_causal_bias'):
+            output["causal_bias"] = self.current_causal_bias
+            output["causal_Cj"] = self.causal_Cj
+        # ==========================================
         
         return loss_all, output
 
@@ -362,7 +442,7 @@ class MEAformer(nn.Module):
         if only_joint:
             return joint_emb, weight_norm
         else:
-            return gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states
+            return gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states, weight_norm
 
     # --------- share ---------------
 
@@ -425,17 +505,78 @@ class MEAformer(nn.Module):
         # 难度惩罚与低置信度惩罚权重函数 (公式 17 的动态权重)
         w_D = 1.0 - alpha  # 随训练递减，早期抑制瞬时剧烈变化
         w_C = alpha        # 随训练递增，晚期抑制低置信度模态
+
+        # ====== 核心修复：对 D_j 进行相对归一化 ======
+        raw_Dj = torch.tensor([self.causal_Dj[m] for m in self.modal_names], dtype=torch.float32, device=self.args.device)
+        Dj_sum = raw_Dj.sum() + 1e-8 
+        norm_Dj = raw_Dj / Dj_sum  # 归一化到 [0, 1]
+        # ============================================
         
         biases = []
-        for m in self.modal_names:
+        for idx, m in enumerate(self.modal_names):
             # (2) 计算偏置 Bias_j (公式 16 对应的惩罚逻辑)
             # Bias 为负值，起到惩罚作用
-            bias_j = - (w_D * self.causal_Dj[m] + w_C * (1.0 - self.causal_Cj[m]))
+            bias_j = - (w_D * norm_Dj[idx] + w_C * (1.0 - self.causal_Cj[m]))
+            # bias_j = - (w_D * self.causal_Dj[m] + w_C * (1.0 - self.causal_Cj[m]))
             biases.append(bias_j)
             
         # 转换为 Tensor，并乘以超参数 λ
         causal_bias = torch.tensor(biases, dtype=torch.float32, device=self.args.device) * self.args.causal_lambda
+
+        # 为了方便监控，我们把这一轮的 bias 存进实例变量
+        self.current_causal_bias = {m: biases[idx].item() * self.args.causal_lambda for idx, m in enumerate(self.modal_names)}
+
         return causal_bias
+    
+    #提供一个健壮的 compute_csc_loss 实现
+    def compute_csc_loss(self, input_idx, embs_list, joint_emb_factual, weight_norm, epoch, total_epochs):
+        import torch.nn.functional as F
+        import math
+        
+        # 1. 过滤掉被关闭的模态 (值为 None 的特征)
+        valid_embs = [emb for emb in embs_list if emb is not None]
+        valid_modal_num = len(valid_embs)
+        
+        # 沿着维度1堆叠: 形状变为 [ent_num, valid_modal_num, hidden_size]
+        X = torch.stack(valid_embs, dim=1) 
+        
+        # 2. 处理 weight_norm (即 alpha_t)
+        if weight_norm.dim() == 3:
+            alpha_t = weight_norm.mean(dim=1)  # [ent_num, modal_num]
+        else:
+            alpha_t = weight_norm
+
+        # 3. 动态初始化或校准 alpha_prev
+        if not hasattr(self, 'alpha_prev') or self.alpha_prev.size(1) != valid_modal_num:
+            self.register_buffer('alpha_prev', torch.ones(X.size(0), valid_modal_num, device=X.device) / valid_modal_num)
+
+        # ====== 核心修复：手动计算事实融合表征 z_factual (对应论文公式 8) ======
+        # 不使用拼接的 1200 维 joint_emb_factual，而是用当前权重加权求和得到 300 维表征
+        z_factual = torch.sum(alpha_t.unsqueeze(-1) * X, dim=1)
+
+        # (正向) 时序平稳的反事实表征 z_prev
+        alpha_prev_batch = self.alpha_prev[input_idx].detach() 
+        z_prev = torch.sum(alpha_prev_batch.unsqueeze(-1) * X, dim=1) 
+
+        # (负向) 因果盲目的反事实表征 z_uni (均匀融合)
+        z_uni = torch.mean(X, dim=1) 
+
+        # 采用余弦距离计算 (Distance = 1 - Cosine Similarity)
+        # 注意这里把 joint_emb_factual 换成了 z_factual
+        d_pos = 1.0 - F.cosine_similarity(z_factual, z_prev, dim=-1)
+        d_neg = 1.0 - F.cosine_similarity(z_factual, z_uni, dim=-1)
+        
+        # 计算基于间隔(Margin)的对比损失: max(0, d_pos - d_neg + gamma)
+        margin = self.args.csc_gamma
+        loss_csc = torch.clamp(d_pos - d_neg + margin, min=0.0).mean()
+
+        # 计算时间衰减平滑系数 lambda(t)
+        lambda_t = self.args.csc_lambda_0 * math.exp(-self.args.csc_eta * (epoch / total_epochs))
+
+        # 更新历史权重 buffer，供下一个 Epoch 使用 (记得 detach)
+        self.alpha_prev[input_idx] = alpha_t.detach()
+
+        return lambda_t * loss_csc
 
     def _register_grad_hooks(self, embs_dict):
         """利用 Hook 在反向传播时自动捕获并更新 D_j"""

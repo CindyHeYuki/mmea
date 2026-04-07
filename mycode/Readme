@@ -5,19 +5,29 @@ gpustat -cp
 
 想一次性看所有正在跑 python 程序的所有进程
 ps -ef | grep python
-
 ps -f -p <那个PID>
+
+gpustat -cpu
+ps -eo user,pid,etime,cmd | grep [p]ython | grep -v vscode
+
 
 创建进程组
 set -m
-CUDA_VISIBLE_DEVICES=3 nohup bash run_gpu3.sh > nohup_gpu2.out 2>&1 &
+CUDA_VISIBLE_DEVICES=2 nohup bash run_gpu2.sh > nohup_gpu2.out 2>&1 &
+set -m
 CUDA_VISIBLE_DEVICES=3 nohup bash run_gpu3.sh > nohup_gpu3.out 2>&1 &
 
-
+CUDA_VISIBLE_DEVICES=1 nohup bash run_gpu1.sh > nohup_gpu1.out 2>&1 &
 停止
 kill -9 -$!
 
+pkill -9 -u hwx -f "run_gpu2.sh"
+pkill -9 -u hwx -f "python main.py"
 
+查看参数是否修改并且保存
+grep "epoch" run_meaformer.sh
+简单测试
+bash run_meaformer.sh 1 FBDB15K norm 0.8 0
 
 参数实验和消融实验相关
 

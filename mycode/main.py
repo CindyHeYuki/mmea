@@ -227,15 +227,20 @@ class Runner:
                 self.update_loss_log()
                 if (i + 1) % self.args.eval_epoch == 0:
                     self.eval()
-                # ====== 在这里紧接着插入新增的定期评估 C_j 代码 ======
+
+                # ====== 新增：定期评估 C_j ======
                 if self.args.use_causal_bias and (i + 1) % self.args.causal_eval_k == 0:
-                    # 提示：由于分别评估单个模态需要阻断其他模态，为简化代码并提升训练效率，
-                    # 这里你可以选择传入上一轮的独立指标，或者调用一个单独的评估函数 self.eval_single_modal()
-                    # 假定返回的是各个模态的 hits@1 字典，例如:
-                    # mock_hits_dict = {'img': 0.6, 'att': 0.7, 'rel': 0.5, 'gph': 0.8, 'name': 0.9, 'char': 0.85}
-                    # self.model.module.update_Cj(mock_hits_dict) if self.args.dist else self.model.update_Cj(mock_hits_dict)
-                    pass
-                # =======================================================
+                    self.evaluate_Cj()  # 调用真实评估！
+                # ===============================
+                # # ====== 在这里紧接着插入新增的定期评估 C_j 代码 ======
+                # if self.args.use_causal_bias and (i + 1) % self.args.causal_eval_k == 0:
+                #     # 提示：由于分别评估单个模态需要阻断其他模态，为简化代码并提升训练效率，
+                #     # 这里你可以选择传入上一轮的独立指标，或者调用一个单独的评估函数 self.eval_single_modal()
+                #     # 假定返回的是各个模态的 hits@1 字典，例如:
+                #     # mock_hits_dict = {'img': 0.6, 'att': 0.7, 'rel': 0.5, 'gph': 0.8, 'name': 0.9, 'char': 0.85}
+                #     # self.model.module.update_Cj(mock_hits_dict) if self.args.dist else self.model.update_Cj(mock_hits_dict)
+                #     pass
+                # # =======================================================
                 
                 _tqdm.update(1)
                 if self.stage == 1 and self.early_stop_count <= 0:
@@ -354,6 +359,10 @@ class Runner:
             self.weight = output['weight']
         if 'loss_weight' in output and output['loss_weight'] is not None:
             self.loss_weight = output['loss_weight']
+        # 新增接住因果参数
+        if 'causal_bias' in output:
+            self.causal_bias_log = output['causal_bias']
+            self.causal_Cj_log = output['causal_Cj']
 
     def update_loss_log(self):
         vis_dict = {"train_loss": self.curr_loss}
@@ -377,6 +386,13 @@ class Runner:
             weight_dic["kpi"] = 1 / (self.loss_weight[1]**2)
             self.writer.add_scalars("loss_weight", weight_dic, self.step)
 
+        # ====== 新增：把 Causal Bias 和 C_j 画进 TensorBoard ======
+        if hasattr(self, 'causal_bias_log') and self.causal_bias_log is not None:
+            self.writer.add_scalars("Causal/Bias_Value", self.causal_bias_log, self.step)
+        if hasattr(self, 'causal_Cj_log') and self.causal_Cj_log is not None:
+            self.writer.add_scalars("Causal/Inherent_Confidence_Cj", self.causal_Cj_log, self.step)
+        # ==========================================================
+
         self.curr_loss = 0.
         for key in self.curr_loss_dic:
             self.curr_loss_dic[key] = 0.
@@ -397,6 +413,47 @@ class Runner:
         test_right = self.eval_right
         self.model.eval()
         self._test(test_left, test_right, last_epoch=last_epoch, save_name=save_name)
+
+
+    def evaluate_Cj(self):
+        """极其高效的单模态独立评估，用于计算 C_j"""
+        self.model.eval()
+        with torch.no_grad():
+            # 1. 拿到还没融合的独立特征
+            if self.args.model_name in ["MEAformer"]:
+                gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, _, _, _ = self.model.joint_emb_generat(only_joint=False)
+            else:
+                return # 仅支持 MEAformer
+                
+            embs_dict = {'img': img_emb, 'att': att_emb, 'rel': rel_emb, 'gph': gph_emb, 'name': name_emb, 'char': char_emb}
+            test_left = self.eval_left
+            test_right = self.eval_right
+            
+            hits1_dict = {}
+            for m, emb in embs_dict.items():
+                if emb is None:
+                    hits1_dict[m] = 0.0
+                    continue
+                
+                emb = F.normalize(emb)
+                # 计算 L2 距离 (为了速度，这里用最简单的矩阵运算)
+                distance = pairwise_distances(emb[test_left], emb[test_right])
+                
+                # 统计 Hits@1
+                preds = torch.argmin(distance, dim=1)
+                labels = torch.arange(len(test_left)).to(preds.device)
+                hits1 = (preds == labels).float().mean().item()
+                hits1_dict[m] = hits1
+                
+        # 2. 更新模型中的 C_j
+        if self.args.dist:
+            self.model.module.update_Cj(hits1_dict)
+        else:
+            self.model.update_Cj(hits1_dict)
+            
+        self.logger.info(f"[Causal Eval] Ep {self.epoch} | 独立模态 Hits@1: {hits1_dict}")
+        self.model.train() # 切回训练模式
+    
 
     # one time test
     def test(self, save_name="", last_epoch=True):

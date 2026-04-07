@@ -41,5 +41,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --use_surface   $5     \
             --use_intermediate 1   \
             --replay 0 \
+            --use_causal_bias 1 \
+            --causal_lambda 0.1 \
+            --causal_eval_k 10
             #--enable_sota \
             
