@@ -15,7 +15,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --data_choice   $2 \
             --data_split    $3 \
             --data_rate     $4 \
-            --epoch         500 \
+            --epoch         50 \
             --lr            5e-4  \
             --hidden_units  "300,300,300" \
             --save_model    0 \
@@ -41,8 +41,13 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --use_surface   $5     \
             --use_intermediate 1   \
             --replay 0 \
-            --use_causal_bias 1 \
+            --use_causal_bias 0 \
             --causal_lambda 0.1 \
-            --causal_eval_k 10
+            --causal_eval_k 10 \
+            --use_csc 1 \
+            --csc_lambda_0 1.0 \
+            --csc_eta 5.0 \
+            --csc_gamma 0.1
+
             #--enable_sota \
             

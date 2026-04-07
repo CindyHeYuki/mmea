@@ -571,7 +571,16 @@ class MEAformer(nn.Module):
         loss_csc = torch.clamp(d_pos - d_neg + margin, min=0.0).mean()
 
         # 计算时间衰减平滑系数 lambda(t)
-        lambda_t = self.args.csc_lambda_0 * math.exp(-self.args.csc_eta * (epoch / total_epochs))
+        # ======== 修复：CSC 模块的延迟预热 (Warm-up) 机制 ========
+        if epoch < 10:
+            # 前 10 个 Epoch 绝对不干预！
+            # 让模型靠基础 Loss 自由探索，建立起健康的、摆脱了均匀分布的正向历史锚点 (W_avg)
+            lambda_t = 0.0  
+        else:
+            # 10 轮之后，健康的锚点已经成型
+            # 此时逐渐加大约束力度，防止模型在后续训练中震荡或灾难性遗忘
+            lambda_t = self.args.csc_lambda_0 * ((epoch - 10) / (total_epochs - 10))
+        # lambda_t = self.args.csc_lambda_0 * math.exp(-self.args.csc_eta * (epoch / total_epochs))
 
         # 更新历史权重 buffer，供下一个 Epoch 使用 (记得 detach)
         self.alpha_prev[input_idx] = alpha_t.detach()
