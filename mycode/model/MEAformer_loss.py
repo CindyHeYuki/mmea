@@ -44,20 +44,27 @@ class icl_loss(nn.Module):
         self.replay = replay
         self.neg_cross_kg = neg_cross_kg
 
-    def softXEnt(self, target, logits, replay=False, neg_cross_kg=False):
+    def softXEnt(self, target, logits, replay=False, neg_cross_kg=False,sample_weights=None):
         # torch.Size([2239, 4478])
 
         logprobs = F.log_softmax(logits, dim=1)
-        loss = -(target * logprobs).sum() / logits.shape[0]
+
+        #new1
+        # 1. 计算出每个样本独立的 loss，不要直接 .sum() 完除以 batch_size
+        per_sample_loss = -(target * logprobs).sum(dim=1)
+        
+        # 2. 如果传进来了软权重，就按样本对应相乘！
+        if sample_weights is not None:
+            per_sample_loss = per_sample_loss * sample_weights.to(per_sample_loss.device)
+            
+        # 3. 最后再求均值
+        loss = per_sample_loss.mean()
+
         if replay:
-            logits = logits
             idx = torch.arange(start=0, end=logprobs.shape[0], dtype=torch.int64).cuda()
             stg_neg = logits.argmax(dim=1)
             new_value = torch.zeros(logprobs.shape[0]).cuda()
-            index = (
-                idx,
-                stg_neg,
-            )
+            index = (idx, stg_neg,)
             logits = logits.index_put(index, new_value)
             stg_neg_2 = logits.argmax(dim=1)
             tmp = idx.eq_(stg_neg)
@@ -65,11 +72,32 @@ class icl_loss(nn.Module):
             return loss, neg_idx
 
         return loss
+        #loss = -(target * logprobs).sum() / logits.shape[0]
+
+        
+        # if replay:
+        #     logits = logits
+        #     idx = torch.arange(start=0, end=logprobs.shape[0], dtype=torch.int64).cuda()
+        #     stg_neg = logits.argmax(dim=1)
+        #     new_value = torch.zeros(logprobs.shape[0]).cuda()
+        #     index = (
+        #         idx,
+        #         stg_neg,
+        #     )
+        #     logits = logits.index_put(index, new_value)
+        #     stg_neg_2 = logits.argmax(dim=1)
+        #     tmp = idx.eq_(stg_neg)
+        #     neg_idx = stg_neg - stg_neg * tmp + stg_neg_2 * tmp
+        #     return loss, neg_idx
+
+        # return loss
+
+        # end new_1
 
     # train_links[:, 0]: shape: (2239,)
     # array([11303,  2910,  2072, ..., 10504, 13555,  8416], dtype=int32)
 
-    def forward(self, emb, train_links, neg_l=None, neg_r=None, norm=True):
+    def forward(self, emb, train_links, neg_l=None, neg_r=None, norm=True, sample_weights=None):
         if norm:
             emb = F.normalize(emb, dim=1)
         num_ent = emb.shape[0]
@@ -129,15 +157,17 @@ class icl_loss(nn.Module):
                 logits_a = torch.cat([logits_ab, logits_aa, logits_ana], dim=1)
                 logits_b = torch.cat([logits_ba, logits_bb, logits_bnb], dim=1)
 
+
+        #new 1
         if self.replay:
-            loss_a, a_neg_idx = self.softXEnt(labels, logits_a, replay=True, neg_cross_kg=self.neg_cross_kg)
+            # 所有调用 softXEnt 的地方都加上 sample_weights=sample_weights
+            loss_a, a_neg_idx = self.softXEnt(labels, logits_a, replay=True, neg_cross_kg=self.neg_cross_kg, sample_weights=sample_weights)
             if neg_l is not None:
-                loss_b, b_neg_idx = self.softXEnt(labels_2, logits_b, replay=True, neg_cross_kg=self.neg_cross_kg)
-                #
+                loss_b, b_neg_idx = self.softXEnt(labels_2, logits_b, replay=True, neg_cross_kg=self.neg_cross_kg, sample_weights=sample_weights)
                 a_ea_cand = torch.cat([train_links[:, 1], train_links[:, 0], neg_l]).cuda()
                 b_ea_cand = torch.cat([train_links[:, 0], train_links[:, 1], neg_r]).cuda()
             else:
-                loss_b, b_neg_idx = self.softXEnt(labels, logits_b, replay=True, neg_cross_kg=self.neg_cross_kg)
+                loss_b, b_neg_idx = self.softXEnt(labels, logits_b, replay=True, neg_cross_kg=self.neg_cross_kg, sample_weights=sample_weights)
                 a_ea_cand = torch.cat([train_links[:, 1], train_links[:, 0]]).cuda()
                 b_ea_cand = torch.cat([train_links[:, 0], train_links[:, 1]]).cuda()
 
@@ -146,6 +176,30 @@ class icl_loss(nn.Module):
             return alpha * loss_a + (1 - alpha) * loss_b, a_neg, b_neg
 
         else:
-            loss_a = self.softXEnt(labels, logits_a)
-            loss_b = self.softXEnt(labels, logits_b)
+            # 这里也加上
+            loss_a = self.softXEnt(labels, logits_a, sample_weights=sample_weights)
+            loss_b = self.softXEnt(labels, logits_b, sample_weights=sample_weights)
             return alpha * loss_a + (1 - alpha) * loss_b
+        
+        # if self.replay:
+        #     loss_a, a_neg_idx = self.softXEnt(labels, logits_a, replay=True, neg_cross_kg=self.neg_cross_kg)
+        #     if neg_l is not None:
+        #         loss_b, b_neg_idx = self.softXEnt(labels_2, logits_b, replay=True, neg_cross_kg=self.neg_cross_kg)
+        #         #
+        #         a_ea_cand = torch.cat([train_links[:, 1], train_links[:, 0], neg_l]).cuda()
+        #         b_ea_cand = torch.cat([train_links[:, 0], train_links[:, 1], neg_r]).cuda()
+        #     else:
+        #         loss_b, b_neg_idx = self.softXEnt(labels, logits_b, replay=True, neg_cross_kg=self.neg_cross_kg)
+        #         a_ea_cand = torch.cat([train_links[:, 1], train_links[:, 0]]).cuda()
+        #         b_ea_cand = torch.cat([train_links[:, 0], train_links[:, 1]]).cuda()
+
+        #     a_neg = a_ea_cand[a_neg_idx]
+        #     b_neg = b_ea_cand[b_neg_idx]
+        #     return alpha * loss_a + (1 - alpha) * loss_b, a_neg, b_neg
+
+        # else:
+        #     loss_a = self.softXEnt(labels, logits_a)
+        #     loss_b = self.softXEnt(labels, logits_b)
+        #     return alpha * loss_a + (1 - alpha) * loss_b
+
+        #end new 1

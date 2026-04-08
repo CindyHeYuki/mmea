@@ -18,6 +18,9 @@ set -m
 CUDA_VISIBLE_DEVICES=3 nohup bash run_gpu3.sh > nohup_gpu3.out 2>&1 &
 
 CUDA_VISIBLE_DEVICES=1 nohup bash run_gpu1.sh > nohup_gpu1.out 2>&1 &
+
+CUDA_VISIBLE_DEVICES=0 nohup bash run_gpu0.sh > nohup_gpu0.out 2>&1 &
+
 停止
 kill -9 -$!
 
@@ -27,8 +30,12 @@ pkill -9 -u hwx -f "python main.py"
 查看参数是否修改并且保存
 grep "epoch" run_meaformer.sh
 简单测试
-bash run_meaformer.sh 1 FBDB15K norm 0.8 0
+bash run_meaformer.sh 0 FBDB15K norm 0.2 0
 bash run_meaformer.sh 1 FBDB15K norm 0.2 0 > test.out 2>&1 &
+nohup bash run_meaformer_il.sh 1 FBDB15K norm 0.2 0 > test_il.out 2>&1 &
+bash run_meaformerpart1.sh 3 FBDB15K norm 0.2 0 > test_part1.out 2>&1 &
+
+nohup bash run_meaformer.sh 3 FBDB15K norm 0.2 0 > test_12.out 2>&1 &
 
 参数实验和消融实验相关
 
@@ -44,3 +51,19 @@ bash run_meaformer.sh 1 FBDB15K norm 0.2 0 > test.out 2>&1 &
 --causal_beta: 论文公式(14)中的历史衰减因子 $\beta$。控制固有因果置信度 $C_j$ 的更新（默认 0.5）。
 --causal_eval_k: 论文中的 $K$。控制每隔多少个 epoch 评估一次固有因果置信度（默认 10）。
 
+创新点三：
+传统的平滑约束（如 EMA）存在一个致命缺陷：它们假设所有样本从 Epoch 0 开始就处于同步学习状态。
+然而，在引入**模块一（样本调度 Curriculum Learning）**后，由于困难样本被延迟引入，传统约束会强迫这些‘新生’样本的历史锚点锁定在初始的均匀分布上，导致与负向锚点冲突，引发梯度撕裂。
+为此，我们提出了一种课程感知的反事实约束（Curriculum-Aware Counterfactual Constraint）。
+我们引入了一个‘成熟度感知门控（Maturity-Aware Gating）’，只有当模型对某个样本形成了一定认知（历史锚点偏离了盲目的均匀分布）后，反事实平滑才开始介入；而对于刚被调度器释放的困难样本，模型允许其进行无约束的自由探索。"
+
+tensorboard打开方式
+第一步：在远程服务器上启动 TensorBoard
+在远程服务器的终端里，进入你的项目根目录，运行以下命令：
+# 请将路径替换为你实际的 tensorboard 文件夹路径，例如 data/mmkg/dump/tensorboard
+tensorboard --logdir ../../data/mmkg/dump/tensorboard --port 6006
+启动成功后，终端会显示类似这样的提示：TensorBoard 2.x.x at http://localhost:6006/ (Press CTRL+C to quit)。这时候把它放在那，不要关闭这个终端。
+第二步：在你的本地电脑上做端口映射 (SSH 隧道)
+点击 VS Code 底部状态栏的 "PORTS" (端口) 标签。
+点击 "Forward a Port" (转发端口)。
+输入 6006 并回车。VS Code 会自动把它映射到你本地的 6006 端口。

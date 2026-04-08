@@ -299,23 +299,31 @@ class Runner:
 
 
         for batch_dict in self.train_dataloader:
-            # ====== 样本筛选 ======
-            if 'difficulties' in batch_dict:  # 训练批次包含难度信息
-                difficulties = torch.tensor(batch_dict['difficulties'], device=self.args.device)
-                mask = difficulties < threshold
-                selected_ent1 = batch_dict['ent1'][mask.cpu().numpy()]
-                selected_ent2 = batch_dict['ent2'][mask.cpu().numpy()]
-                # 如果筛选后批次为空，跳过该批次
-                if len(selected_ent1) == 0:
-                    continue
-                # ====== 使用筛选后的样本训练 ======
-                selected_batch = np.column_stack((selected_ent1, selected_ent2))
-                # 修改此行，传入 epoch 和总 epoch
-                loss, output = self.model(selected_batch, epoch=self.epoch, total_epochs=self.args.epoch)
-                # loss, output = self.model(selected_batch)
-            else:  # 测试批次没有难度信息
-                # loss, output = self.model(batch_dict)
-                loss, output = self.model(batch_dict, epoch=self.epoch, total_epochs=self.args.epoch)
+            # 无论如何，保证传入完整 batch，稳定模型的心智！
+            loss, output = self.model(batch_dict, epoch=self.epoch, total_epochs=self.args.epoch)
+
+
+        # #调度？
+        # for batch_dict in self.train_dataloader:
+        #     # ====== 样本筛选 ======
+        #     if 'difficulties' in batch_dict:  # 训练批次包含难度信息
+        #         if self.args.use_sample_schedule == 1:
+        #             # 【开启模块一】执行样本难度过滤
+        #             difficulties = torch.tensor(batch_dict['difficulties'], device=self.args.device)
+        #             mask = difficulties < threshold
+        #             selected_ent1 = batch_dict['ent1'][mask.cpu().numpy()]
+        #             selected_ent2 = batch_dict['ent2'][mask.cpu().numpy()]
+        #             # 如果筛选后批次为空，跳过该批次
+        #             if len(selected_ent1) == 0:
+        #                 continue
+        #         else:
+        #             # 【关闭模块一】不进行过滤，使用当前 batch 的全部样本
+        #             selected_batch = np.column_stack((batch_dict['ent1'], batch_dict['ent2']))
+        #         # 统一输入模型计算 loss
+        #         loss, output = self.model(selected_batch, epoch=self.epoch, total_epochs=self.args.epoch)
+        #     else:  # 测试批次没有难度信息
+        #         # loss, output = self.model(batch_dict)
+        #         loss, output = self.model(batch_dict, epoch=self.epoch, total_epochs=self.args.epoch)
 
             #loss, output = self.model(batch)
             loss = loss / accumulation_steps
@@ -624,6 +632,17 @@ if __name__ == '__main__':
     print(f"  是否使用表面特征: {cfgs.use_surface}")
     print(f"  实验名称: {cfgs.exp_name}")
     print(f"  实验ID: {cfgs.exp_id}")
+
+    # ====== 建议加上的消融实验参数 ======
+    print("-" * 30)
+    print("  [消融实验模块状态]")
+    print(f"  模块一 (样本调度): {'开启' if cfgs.use_sample_schedule else '关闭'} (k={cfgs.k})")
+    print(f"  模块二 (因果加权): {'开启' if cfgs.use_causal_bias else '关闭'} (lambda={cfgs.causal_lambda})")
+    print(f"  模块三 (反事实Loss): {'开启' if cfgs.use_csc else '关闭'} (lambda_0={cfgs.csc_lambda_0})")
+    # ==================================
+
+
+
     print("="*60 + "\n")
     
 

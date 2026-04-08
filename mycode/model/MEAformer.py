@@ -124,6 +124,9 @@ class MEAformer(nn.Module):
         # 动态获取所在设备，避免硬编码 .cuda() 或未定义的 self.device
         device = joint_emb.device 
 
+        # ====== 新增：初始化软权重 ======
+        sample_weights = None 
+
         # 统一处理输入格式
         if isinstance(input_batch, dict):  # 训练数据（包含难度信息）
             batch_tensor = torch.stack([
@@ -131,6 +134,17 @@ class MEAformer(nn.Module):
                 torch.tensor(input_batch['ent2'], dtype=torch.int64, device=device)
             ], dim=1)
             difficulties = torch.tensor(input_batch['difficulties'], device=device)
+            
+            # ====== 核心创新：软加权 (Soft Weighting) 调度 ======
+            if self.args.use_sample_schedule == 1 and self.training:
+                # 计算当前 Epoch 的平滑阈值
+                threshold = 1 - math.exp(-self.args.k * epoch / total_epochs)
+                
+                # 【绝妙公式】：(difficulties - threshold).clamp(min=0)
+                # 难度比阈值低，结果为0，exp(0)=1，权重为1，全盘吸收！
+                # 难度比阈值高，差值越大，exp(-差值) 越接近 0，实现软惩罚！
+                sample_weights = torch.exp(- (difficulties - threshold).clamp(min=0))
+            # ===================================================
         else:  # 测试数据（无难度信息）
             batch_tensor = torch.tensor(input_batch, dtype=torch.int64, device=device)
             difficulties = None
@@ -140,8 +154,8 @@ class MEAformer(nn.Module):
             all_ent_batch = torch.cat([batch_tensor[:, 0], batch_tensor[:, 1]])
             
             if not self.replay_ready:
-                # 【修复】传完整的 joint_emb，而不是切片后的 ent_emb
-                loss_joi, l_neg, r_neg = self.criterion_cl_joint(joint_emb, batch_tensor)
+                # 【修改】下发 sample_weights
+                loss_joi, l_neg, r_neg = self.criterion_cl_joint(joint_emb, batch_tensor, sample_weights=sample_weights)
             else:
                 neg_l = self.replay_matrix[batch_tensor[:, 0], self.idx_one[:batch_tensor.shape[0]]]
                 neg_r = self.replay_matrix[batch_tensor[:, 1], self.idx_one[:batch_tensor.shape[0]]]
@@ -156,8 +170,8 @@ class MEAformer(nn.Module):
                 neg_l_ipt = torch.tensor(neg_l_list, dtype=torch.int64, device=device)
                 neg_r_ipt = torch.tensor(neg_r_list, dtype=torch.int64, device=device)
                 
-                # 【修复】同理，恢复原有的参数签名
-                loss_joi, l_neg, r_neg = self.criterion_cl_joint(joint_emb, batch_tensor, neg_l_ipt, neg_r_ipt)
+                # 【修改】下发 sample_weights
+                loss_joi, l_neg, r_neg = self.criterion_cl_joint(joint_emb, batch_tensor, neg_l_ipt, neg_r_ipt, sample_weights=sample_weights)
             
             index = (
                 all_ent_batch,
@@ -176,21 +190,85 @@ class MEAformer(nn.Module):
                 else:
                     self.last_num = num
         else:
-            # 【修复】恢复原有传参
-            loss_joi = self.criterion_cl_joint(joint_emb, batch_tensor)
+            # 【修改】下发 sample_weights
+            loss_joi = self.criterion_cl_joint(joint_emb, batch_tensor, sample_weights=sample_weights)
         
         # 计算内部视图损失与输出视图损失
-        # 【修复】安全传入 difficulties：只有在它是字典输入时，才传入 difficulties 参数，防止测试集报错
-        if difficulties is not None:
-            in_loss = self.inner_view_loss(gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, batch_tensor, difficulties=difficulties)
-            out_loss = self.inner_view_loss(gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, batch_tensor, difficulties=difficulties)
-        else:
-            in_loss = self.inner_view_loss(gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, batch_tensor)
-            out_loss = self.inner_view_loss(gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, batch_tensor)
+        # 【修改】完全丢弃原来的 difficulties 判断，统一传入计算好的 sample_weights
+        in_loss = self.inner_view_loss(gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, batch_tensor, sample_weights=sample_weights)
+        out_loss = self.inner_view_loss(gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, batch_tensor, sample_weights=sample_weights)
         
 
         # 总损失
         loss_all = loss_joi + in_loss + out_loss
+
+        # # 统一处理输入格式
+        # if isinstance(input_batch, dict):  # 训练数据（包含难度信息）
+        #     batch_tensor = torch.stack([
+        #         torch.tensor(input_batch['ent1'], dtype=torch.int64, device=device),
+        #         torch.tensor(input_batch['ent2'], dtype=torch.int64, device=device)
+        #     ], dim=1)
+        #     difficulties = torch.tensor(input_batch['difficulties'], device=device)
+        # else:  # 测试数据（无难度信息）
+        #     batch_tensor = torch.tensor(input_batch, dtype=torch.int64, device=device)
+        #     difficulties = None
+
+        # 计算对比损失
+        # if self.args.replay:
+        #     all_ent_batch = torch.cat([batch_tensor[:, 0], batch_tensor[:, 1]])
+            
+        #     if not self.replay_ready:
+        #         # 【修复】传完整的 joint_emb，而不是切片后的 ent_emb
+        #         loss_joi, l_neg, r_neg = self.criterion_cl_joint(joint_emb, batch_tensor)
+        #     else:
+        #         neg_l = self.replay_matrix[batch_tensor[:, 0], self.idx_one[:batch_tensor.shape[0]]]
+        #         neg_r = self.replay_matrix[batch_tensor[:, 1], self.idx_one[:batch_tensor.shape[0]]]
+                
+        #         neg_l_set = set(neg_l.tolist())
+        #         neg_r_set = set(neg_r.tolist())
+        #         all_ent_set = set(all_ent_batch.tolist())
+                
+        #         neg_l_list = list(neg_l_set - all_ent_set)
+        #         neg_r_list = list(neg_r_set - all_ent_set)
+                
+        #         neg_l_ipt = torch.tensor(neg_l_list, dtype=torch.int64, device=device)
+        #         neg_r_ipt = torch.tensor(neg_r_list, dtype=torch.int64, device=device)
+                
+        #         # 【修复】同理，恢复原有的参数签名
+        #         loss_joi, l_neg, r_neg = self.criterion_cl_joint(joint_emb, batch_tensor, neg_l_ipt, neg_r_ipt)
+            
+        #     index = (
+        #         all_ent_batch,
+        #         self.idx_double[:batch_tensor.shape[0] * 2],
+        #     )
+        #     new_value = torch.cat([l_neg, r_neg]).to(device)
+        #     self.replay_matrix = self.replay_matrix.index_put(index, new_value)
+            
+        #     if self.replay_ready == 0:
+        #         num = torch.sum(self.replay_matrix < 0)
+        #         if num == self.last_num:
+        #             self.replay_ready = 1
+        #             print("-----------------------------------------")
+        #             print("begin replay!")
+        #             print("-----------------------------------------")
+        #         else:
+        #             self.last_num = num
+        # else:
+        #     # 【修复】恢复原有传参
+        #     loss_joi = self.criterion_cl_joint(joint_emb, batch_tensor)
+        
+        # # 计算内部视图损失与输出视图损失
+        # # 【修复】安全传入 difficulties：只有在它是字典输入时，才传入 difficulties 参数，防止测试集报错
+        # if difficulties is not None:
+        #     in_loss = self.inner_view_loss(gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, batch_tensor, difficulties=difficulties)
+        #     out_loss = self.inner_view_loss(gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, batch_tensor, difficulties=difficulties)
+        # else:
+        #     in_loss = self.inner_view_loss(gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, batch_tensor)
+        #     out_loss = self.inner_view_loss(gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, batch_tensor)
+        
+
+        # # 总损失
+        # loss_all = loss_joi + in_loss + out_loss
         loss_dic = {"joint_Intra_modal": loss_joi.item(), "Intra_modal": in_loss.item()}
         output = {"loss_dic": loss_dic, "emb": joint_emb}
 
@@ -226,6 +304,19 @@ class MEAformer(nn.Module):
             output["causal_bias"] = self.current_causal_bias
             output["causal_Cj"] = self.causal_Cj
         # ==========================================
+
+        # ====== 修复：将平均模态融合权重传给画图系统 ======
+        if weight_norm is not None:
+            # weight_norm 的形状可能是 [ent_num, modal_num] 
+            if weight_norm.dim() == 3:
+                avg_weight = weight_norm.mean(dim=[0, 1]) 
+            else:
+                # 对所有实体取平均，得到当前 batch / 全局的模态平均权重
+                avg_weight = weight_norm.mean(dim=0) 
+            
+            # 转成 python 的 list 传出去
+            output["weight"] = avg_weight.detach().cpu().tolist()
+        # =================================================
         
         return loss_all, output
 
@@ -389,9 +480,9 @@ class MEAformer(nn.Module):
 
         return gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, joint_emb
     
-    def inner_view_loss(self, gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, train_ill, difficulties=None):
-        # 如果传入了 difficulties，就打包成参数字典传给底层的 loss 函数
-        kwargs = {'difficulties': difficulties} if difficulties is not None else {}
+    def inner_view_loss(self, gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, train_ill, sample_weights=None):
+        # 【修改】接收 sample_weights，打包成字典透传给底层的 loss 函数
+        kwargs = {'sample_weights': sample_weights} if sample_weights is not None else {}
         
         loss_GCN = self.criterion_cl(gph_emb, train_ill, **kwargs) if gph_emb is not None else 0
         loss_rel = self.criterion_cl(rel_emb, train_ill, **kwargs) if rel_emb is not None else 0
@@ -402,6 +493,21 @@ class MEAformer(nn.Module):
 
         total_loss = self.multi_loss_layer([loss_GCN, loss_rel, loss_att, loss_img, loss_name, loss_char])
         return total_loss
+        # # 如果传入了 difficulties，就打包成参数字典传给底层的 loss 函数
+        # # ====== 新增：拦截 difficulties，防止传给底层报错 ======
+        # difficulties = kwargs.pop('difficulties', None)
+        # # =======================================================
+        # # kwargs = {'difficulties': difficulties} if difficulties is not None else {}
+        
+        # loss_GCN = self.criterion_cl(gph_emb, train_ill, **kwargs) if gph_emb is not None else 0
+        # loss_rel = self.criterion_cl(rel_emb, train_ill, **kwargs) if rel_emb is not None else 0
+        # loss_att = self.criterion_cl(att_emb, train_ill, **kwargs) if att_emb is not None else 0
+        # loss_img = self.criterion_cl(img_emb, train_ill, **kwargs) if img_emb is not None else 0
+        # loss_name = self.criterion_cl(name_emb, train_ill, **kwargs) if name_emb is not None else 0
+        # loss_char = self.criterion_cl(char_emb, train_ill, **kwargs) if char_emb is not None else 0
+
+        # total_loss = self.multi_loss_layer([loss_GCN, loss_rel, loss_att, loss_img, loss_name, loss_char])
+        # return total_loss
 
     # def inner_view_loss(self, gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, train_ill):
     #     # pdb.set_trace()
@@ -528,61 +634,112 @@ class MEAformer(nn.Module):
 
         return causal_bias
     
-    def compute_csc_loss(self, input_idx, embs_list, weight_norm, epoch, total_epochs):
+    def compute_csc_loss(self, input_idx, embs_list,  weight_norm, epoch, total_epochs):
         import torch.nn.functional as F
+        import math
         
-        valid_modal_num = weight_norm.size(-1)
+        # 1. 过滤掉被关闭的模态 (值为 None 的特征)
+        valid_embs = [emb for emb in embs_list if emb is not None]
+        valid_modal_num = len(valid_embs)
         
+        # 沿着维度1堆叠: 形状变为 [ent_num, valid_modal_num, hidden_size]
+        X = torch.stack(valid_embs, dim=1) 
+        
+        # 2. 处理 weight_norm (即 alpha_t)
         if weight_norm.dim() == 3:
-            alpha_t = weight_norm.mean(dim=1) 
+            alpha_t = weight_norm.mean(dim=1)  # [ent_num, modal_num]
         else:
             alpha_t = weight_norm
 
-        # 1. 初始化慢速移动的“历史锚点”
+        # 3. 动态初始化或校准 alpha_prev
         if not hasattr(self, 'alpha_prev') or self.alpha_prev.size(1) != valid_modal_num:
-            self.register_buffer('alpha_prev', torch.ones(alpha_t.size(0), valid_modal_num, device=alpha_t.device) / valid_modal_num)
+            self.register_buffer('alpha_prev', torch.ones(X.size(0), valid_modal_num, device=X.device) / valid_modal_num)
 
-        # 负向锚点：永远盲目的均匀分布
-        uniform_dist = torch.ones_like(alpha_t) / valid_modal_num
+        # ====== 核心计算：事实融合表征 z_factual ======
+        # 用当前权重加权求和得到当前状态的表征
+        z_factual = torch.sum(alpha_t.unsqueeze(-1) * X, dim=1)
 
-        # =====================================================================
-        # 🌟 理论升级 1：纯粹的权重空间约束 (Weight Space KL-Divergence)
-        # 抛弃高维特征空间的 Cosine 距离，直接用 KL 散度约束注意力的概率分布！
-        # 梯度极其平滑、干净，彻底杜绝梯度消失和特征撕裂！
-        # =====================================================================
-        # d_pos: 当前权重离“历史锚点”有多远？ (要求靠近)
-        d_pos = F.kl_div(torch.log(alpha_t + 1e-8), self.alpha_prev.detach(), reduction='none').sum(dim=-1)
+        # ====== (正向) 时序平稳的反事实表征 z_prev ======
+        alpha_prev_batch = self.alpha_prev[input_idx].detach() 
+        z_prev = torch.sum(alpha_prev_batch.unsqueeze(-1) * X, dim=1) 
+
+        # 采用余弦距离计算 (Distance = 1 - Cosine Similarity)
+        # 只要保证模型当前状态 (z_factual) 和上一状态 (z_prev) 不要偏离太远即可
+        d_pos = 1.0 - F.cosine_similarity(z_factual, z_prev, dim=-1)
         
-        # d_neg: 当前权重离“盲目均匀分布”有多远？ (要求远离)
-        d_neg = F.kl_div(torch.log(alpha_t + 1e-8), uniform_dist, reduction='none').sum(dim=-1)
+        # 【重要修改】：删除了 d_neg (远离均匀分布的约束)，避免模型为了逃避惩罚而走向极端单模态
+        loss_csc = d_pos.mean()
 
-        # 🌟 理论升级 2：课程感知掩码 (判断历史锚点是否成熟)
-        # 如果历史锚点本身就是均匀分布(KL散度接近0)，说明样本刚进入训练，不予约束
-        sim_anchor = F.kl_div(torch.log(self.alpha_prev + 1e-8), uniform_dist, reduction='none').sum(dim=-1)
-        mature_mask = (sim_anchor > 0.01).float() 
-
-        # 计算 Margin Loss
-        margin = self.args.csc_gamma
-        loss_per_sample = torch.clamp(d_pos - d_neg + margin, min=0.0)
-        
-        # 应用掩码并求平均
-        loss_csc = (loss_per_sample * mature_mask).mean()
-
-        # 延迟预热 (前 10 轮让模块一自由发挥)
+        # ======== CSC 模块的延迟预热 (Warm-up) 机制 ========
         if epoch < 10:
+            # 前 10 个 Epoch 绝对不干预！
+            # 让模型靠基础 Loss 自由探索，建立起健康的正向历史锚点
             lambda_t = 0.0  
         else:
+            # 10 轮之后，健康的锚点已经成型，逐渐加大约束力度，防止模型在后续训练中震荡或灾难性遗忘
             lambda_t = self.args.csc_lambda_0 * ((epoch - 10) / (total_epochs - 10))
 
-        # =====================================================================
-        # 💣 致命 Bug 修复：解决“金鱼记忆”问题 (真正的 EMA 慢速更新)
-        # 保证 alpha_prev 记录的是真实的跨 Epoch 历史，而不是上一个 Batch 的状态！
-        # =====================================================================
-        if self.training:
-            momentum = 0.999  # 0.95 意味着它记忆了过去约 20 个 Step 的平滑状态
-            self.alpha_prev.data = momentum * self.alpha_prev.data + (1.0 - momentum) * alpha_t.detach()
+        # 更新历史权重 buffer，供下一个 Epoch 使用 (记得 detach 截断梯度)
+        self.alpha_prev[input_idx] = alpha_t.detach()
 
         return lambda_t * loss_csc
+    
+    
+    # def compute_csc_loss(self, input_idx, embs_list, weight_norm, epoch, total_epochs):
+    #     import torch.nn.functional as F
+        
+    #     valid_modal_num = weight_norm.size(-1)
+        
+    #     if weight_norm.dim() == 3:
+    #         alpha_t = weight_norm.mean(dim=1) 
+    #     else:
+    #         alpha_t = weight_norm
+
+    #     # 1. 初始化慢速移动的“历史锚点”
+    #     if not hasattr(self, 'alpha_prev') or self.alpha_prev.size(1) != valid_modal_num:
+    #         self.register_buffer('alpha_prev', torch.ones(alpha_t.size(0), valid_modal_num, device=alpha_t.device) / valid_modal_num)
+
+    #     # 负向锚点：永远盲目的均匀分布
+    #     uniform_dist = torch.ones_like(alpha_t) / valid_modal_num
+
+    #     # =====================================================================
+    #     # 🌟 理论升级 1：纯粹的权重空间约束 (Weight Space KL-Divergence)
+    #     # 抛弃高维特征空间的 Cosine 距离，直接用 KL 散度约束注意力的概率分布！
+    #     # 梯度极其平滑、干净，彻底杜绝梯度消失和特征撕裂！
+    #     # =====================================================================
+    #     # d_pos: 当前权重离“历史锚点”有多远？ (要求靠近)
+    #     d_pos = F.kl_div(torch.log(alpha_t + 1e-8), self.alpha_prev.detach(), reduction='none').sum(dim=-1)
+        
+    #     # d_neg: 当前权重离“盲目均匀分布”有多远？ (要求远离)
+    #     d_neg = F.kl_div(torch.log(alpha_t + 1e-8), uniform_dist, reduction='none').sum(dim=-1)
+
+    #     # 🌟 理论升级 2：课程感知掩码 (判断历史锚点是否成熟)
+    #     # 如果历史锚点本身就是均匀分布(KL散度接近0)，说明样本刚进入训练，不予约束
+    #     sim_anchor = F.kl_div(torch.log(self.alpha_prev + 1e-8), uniform_dist, reduction='none').sum(dim=-1)
+    #     mature_mask = (sim_anchor > 0.01).float() 
+
+    #     # 计算 Margin Loss
+    #     margin = self.args.csc_gamma
+    #     loss_per_sample = torch.clamp(d_pos - d_neg + margin, min=0.0)
+        
+    #     # 应用掩码并求平均
+    #     loss_csc = (loss_per_sample * mature_mask).mean()
+
+    #     # 延迟预热 (前 10 轮让模块一自由发挥)
+    #     if epoch < 10:
+    #         lambda_t = 0.0  
+    #     else:
+    #         lambda_t = self.args.csc_lambda_0 * ((epoch - 10) / (total_epochs - 10))
+
+    #     # =====================================================================
+    #     # 💣 致命 Bug 修复：解决“金鱼记忆”问题 (真正的 EMA 慢速更新)
+    #     # 保证 alpha_prev 记录的是真实的跨 Epoch 历史，而不是上一个 Batch 的状态！
+    #     # =====================================================================
+    #     if self.training:
+    #         momentum = 0.999  # 0.95 意味着它记忆了过去约 20 个 Step 的平滑状态
+    #         self.alpha_prev.data = momentum * self.alpha_prev.data + (1.0 - momentum) * alpha_t.detach()
+
+    #     return lambda_t * loss_csc
     
     #提供一个健壮的 compute_csc_loss 实现
     # def compute_csc_loss(self, input_idx, embs_list, weight_norm, epoch, total_epochs):

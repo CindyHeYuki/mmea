@@ -34,10 +34,19 @@ class EADataset(torch.utils.data.Dataset):
         return len(self.data)
 
     def __getitem__(self, index):
-        return self.data[index]
+        # 正确拿到当前的实体对
+        item = self.data[index]
+        # 如果字典存在，就把难度拼在后面变成长度为 3 的元组
         if self.difficulty_dict is not None:
-            return (*item, self.difficulty_dict.get(tuple(item), 0.0))
+            # item[0] 是 ent1, item[1] 是 ent2
+            diff = self.difficulty_dict.get((item[0], item[1]), 0.0)
+            return (item[0], item[1], diff)
+            
         return item
+        # return self.data[index]
+        # if self.difficulty_dict is not None:
+        #     return (*item, self.difficulty_dict.get(tuple(item), 0.0))
+        # return item
 #Change1 end
 
 

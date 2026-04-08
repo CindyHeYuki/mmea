@@ -34,12 +34,14 @@ class cfg():
         parser.add_argument("--data_rate", type=float, default=0.3, help="training set rate")
         # parser.add_argument("--data_rate", type=float, default=0.3, choices=[0.2, 0.3, 0.5, 0.8], help="training set rate")
 
-        #new 1
+        # ====== 新增：模块一 样本调度机制 ======
         parser.add_argument("--k", default=0.5, type=float, 
                     help="调度速度系数，控制样本引入速度（指数衰减参数）")
         parser.add_argument("--lambda_val", default=0.2, type=float,
                     help="结构稀疏度权重（0-1），用于计算样本难度：λ·ρ_struct + (1-λ)·ρ_modal")
-        #end new 1
+        parser.add_argument("--use_sample_schedule", default=1, type=int, choices=[0, 1],
+                    help="消融实验开关：是否启用样本调度 (1: 开启, 0: 关闭)")
+        # ===================================================
 
         # ====== 新增：模块二 动态因果效应加权机制参数 ======
         parser.add_argument("--use_causal_bias", default=1, type=int, choices=[0, 1],
@@ -194,7 +196,9 @@ class cfg():
             if self.cfg.w_name and self.cfg.w_char:
                 data_split_name = f"{data_split_name}with_surface_"
 
-        self.cfg.exp_id = f"{self.cfg.model_name}_{self.cfg.data_choice}_{data_split_name}{self.cfg.exp_id}"
+
+        # ⬇️ 就是下面这一行在捣鬼，把它注释掉！
+        #self.cfg.exp_id = f"{self.cfg.model_name}_{self.cfg.data_choice}_{data_split_name}{self.cfg.exp_id}"
         self.cfg.data_path = osp.join(self.data_root, self.cfg.data_path)
         self.cfg.dump_path = osp.join(self.cfg.data_path, self.cfg.dump_path)
         if self.cfg.only_test == 1:
