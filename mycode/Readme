@@ -28,6 +28,7 @@ pkill -9 -u hwx -f "python main.py"
 grep "epoch" run_meaformer.sh
 简单测试
 bash run_meaformer.sh 1 FBDB15K norm 0.8 0
+bash run_meaformer.sh 1 FBDB15K norm 0.2 0 > test.out 2>&1 &
 
 参数实验和消融实验相关
 

@@ -209,7 +209,7 @@ class MEAformer(nn.Module):
             input_idx = self.input_idx
             
             # 3. 计算反事实约束 Loss (传入打包好的变量)
-            loss_csc = self.compute_csc_loss(input_idx, embs_list, joint_emb, weight_norm, epoch, total_epochs)
+            loss_csc = self.compute_csc_loss(input_idx, embs_list, weight_norm, epoch, total_epochs)
             
             # 4. 叠加 Loss 并记录
             loss_all = loss_all + loss_csc
@@ -528,64 +528,140 @@ class MEAformer(nn.Module):
 
         return causal_bias
     
-    #提供一个健壮的 compute_csc_loss 实现
-    def compute_csc_loss(self, input_idx, embs_list, joint_emb_factual, weight_norm, epoch, total_epochs):
+    def compute_csc_loss(self, input_idx, embs_list, weight_norm, epoch, total_epochs):
         import torch.nn.functional as F
-        import math
         
-        # 1. 过滤掉被关闭的模态 (值为 None 的特征)
-        valid_embs = [emb for emb in embs_list if emb is not None]
-        valid_modal_num = len(valid_embs)
+        valid_modal_num = weight_norm.size(-1)
         
-        # 沿着维度1堆叠: 形状变为 [ent_num, valid_modal_num, hidden_size]
-        X = torch.stack(valid_embs, dim=1) 
-        
-        # 2. 处理 weight_norm (即 alpha_t)
         if weight_norm.dim() == 3:
-            alpha_t = weight_norm.mean(dim=1)  # [ent_num, modal_num]
+            alpha_t = weight_norm.mean(dim=1) 
         else:
             alpha_t = weight_norm
 
-        # 3. 动态初始化或校准 alpha_prev
+        # 1. 初始化慢速移动的“历史锚点”
         if not hasattr(self, 'alpha_prev') or self.alpha_prev.size(1) != valid_modal_num:
-            self.register_buffer('alpha_prev', torch.ones(X.size(0), valid_modal_num, device=X.device) / valid_modal_num)
+            self.register_buffer('alpha_prev', torch.ones(alpha_t.size(0), valid_modal_num, device=alpha_t.device) / valid_modal_num)
 
-        # ====== 核心修复：手动计算事实融合表征 z_factual (对应论文公式 8) ======
-        # 不使用拼接的 1200 维 joint_emb_factual，而是用当前权重加权求和得到 300 维表征
-        z_factual = torch.sum(alpha_t.unsqueeze(-1) * X, dim=1)
+        # 负向锚点：永远盲目的均匀分布
+        uniform_dist = torch.ones_like(alpha_t) / valid_modal_num
 
-        # (正向) 时序平稳的反事实表征 z_prev
-        alpha_prev_batch = self.alpha_prev[input_idx].detach() 
-        z_prev = torch.sum(alpha_prev_batch.unsqueeze(-1) * X, dim=1) 
-
-        # (负向) 因果盲目的反事实表征 z_uni (均匀融合)
-        z_uni = torch.mean(X, dim=1) 
-
-        # 采用余弦距离计算 (Distance = 1 - Cosine Similarity)
-        # 注意这里把 joint_emb_factual 换成了 z_factual
-        d_pos = 1.0 - F.cosine_similarity(z_factual, z_prev, dim=-1)
-        d_neg = 1.0 - F.cosine_similarity(z_factual, z_uni, dim=-1)
+        # =====================================================================
+        # 🌟 理论升级 1：纯粹的权重空间约束 (Weight Space KL-Divergence)
+        # 抛弃高维特征空间的 Cosine 距离，直接用 KL 散度约束注意力的概率分布！
+        # 梯度极其平滑、干净，彻底杜绝梯度消失和特征撕裂！
+        # =====================================================================
+        # d_pos: 当前权重离“历史锚点”有多远？ (要求靠近)
+        d_pos = F.kl_div(torch.log(alpha_t + 1e-8), self.alpha_prev.detach(), reduction='none').sum(dim=-1)
         
-        # 计算基于间隔(Margin)的对比损失: max(0, d_pos - d_neg + gamma)
-        margin = self.args.csc_gamma
-        loss_csc = torch.clamp(d_pos - d_neg + margin, min=0.0).mean()
+        # d_neg: 当前权重离“盲目均匀分布”有多远？ (要求远离)
+        d_neg = F.kl_div(torch.log(alpha_t + 1e-8), uniform_dist, reduction='none').sum(dim=-1)
 
-        # 计算时间衰减平滑系数 lambda(t)
-        # ======== 修复：CSC 模块的延迟预热 (Warm-up) 机制 ========
+        # 🌟 理论升级 2：课程感知掩码 (判断历史锚点是否成熟)
+        # 如果历史锚点本身就是均匀分布(KL散度接近0)，说明样本刚进入训练，不予约束
+        sim_anchor = F.kl_div(torch.log(self.alpha_prev + 1e-8), uniform_dist, reduction='none').sum(dim=-1)
+        mature_mask = (sim_anchor > 0.01).float() 
+
+        # 计算 Margin Loss
+        margin = self.args.csc_gamma
+        loss_per_sample = torch.clamp(d_pos - d_neg + margin, min=0.0)
+        
+        # 应用掩码并求平均
+        loss_csc = (loss_per_sample * mature_mask).mean()
+
+        # 延迟预热 (前 10 轮让模块一自由发挥)
         if epoch < 10:
-            # 前 10 个 Epoch 绝对不干预！
-            # 让模型靠基础 Loss 自由探索，建立起健康的、摆脱了均匀分布的正向历史锚点 (W_avg)
             lambda_t = 0.0  
         else:
-            # 10 轮之后，健康的锚点已经成型
-            # 此时逐渐加大约束力度，防止模型在后续训练中震荡或灾难性遗忘
             lambda_t = self.args.csc_lambda_0 * ((epoch - 10) / (total_epochs - 10))
-        # lambda_t = self.args.csc_lambda_0 * math.exp(-self.args.csc_eta * (epoch / total_epochs))
 
-        # 更新历史权重 buffer，供下一个 Epoch 使用 (记得 detach)
-        self.alpha_prev[input_idx] = alpha_t.detach()
+        # =====================================================================
+        # 💣 致命 Bug 修复：解决“金鱼记忆”问题 (真正的 EMA 慢速更新)
+        # 保证 alpha_prev 记录的是真实的跨 Epoch 历史，而不是上一个 Batch 的状态！
+        # =====================================================================
+        if self.training:
+            momentum = 0.999  # 0.95 意味着它记忆了过去约 20 个 Step 的平滑状态
+            self.alpha_prev.data = momentum * self.alpha_prev.data + (1.0 - momentum) * alpha_t.detach()
 
         return lambda_t * loss_csc
+    
+    #提供一个健壮的 compute_csc_loss 实现
+    # def compute_csc_loss(self, input_idx, embs_list, weight_norm, epoch, total_epochs):
+    #     import torch.nn.functional as F
+    #     import math
+        
+    #     # 1. 过滤掉被关闭的模态 (值为 None 的特征)
+    #     valid_embs = [emb for emb in embs_list if emb is not None]
+    #     valid_modal_num = len(valid_embs)
+        
+    #     # 沿着维度1堆叠: 形状变为 [ent_num, valid_modal_num, hidden_size]
+    #     X = torch.stack(valid_embs, dim=1)
+
+    #     # =====================================================================
+    #     # 💣 终极拆弹：切断梯度，保护底层特征空间不被撕裂！
+    #     # CSC 模块的作用是“约束注意力权重”，绝不能让梯度流回底层特征去瞎改特征！
+    #     # =====================================================================
+    #     X_detach = X.detach() 
+        
+    #     # 2. 处理 weight_norm (即 alpha_t)
+    #     if weight_norm.dim() == 3:
+    #         alpha_t = weight_norm.mean(dim=1)  # [ent_num, modal_num]
+    #     else:
+    #         alpha_t = weight_norm
+
+    #     # 3. 动态初始化或校准 alpha_prev
+    #     if not hasattr(self, 'alpha_prev') or self.alpha_prev.size(1) != valid_modal_num:
+    #         self.register_buffer('alpha_prev', torch.ones(X.size(0), valid_modal_num, device=X.device) / valid_modal_num)
+
+    #     # ====== 核心修复：手动计算事实融合表征 z_factual (对应论文公式 8) ======
+    #     # 不使用拼接的 1200 维 joint_emb_factual，而是用当前权重加权求和得到 300 维表征
+    #     # ====== 使用 X_detach 计算事实融合表征 z_factual ======
+    #     # 此时，z_factual 的梯度只能顺着 alpha_t 流向注意力生成网络，完美！
+    #     # z_factual = torch.sum(alpha_t.unsqueeze(-1) * X, dim=1)
+    #     z_factual = torch.sum(alpha_t.unsqueeze(-1) * X_detach, dim=1)
+
+    #     # (正向) 时序平稳的反事实表征 z_prev
+    #     alpha_prev_batch = self.alpha_prev[input_idx].detach() 
+    #     z_prev = torch.sum(alpha_prev_batch.unsqueeze(-1) * X_detach, dim=1)
+
+    #     # (负向) 因果盲目的反事实表征 z_uni (均匀融合)
+    #     z_uni = torch.mean(X_detach, dim=1)
+
+    #     # =====================================================================
+    #     # 🌟 核心理论创新：课程感知掩码 (Curriculum-Aware Gating)
+    #     # 诊断样本是否"成熟"：比较历史锚点(z_prev)和盲目锚点(z_uni)
+    #     # 如果它们高度重合(余弦相似度>0.99)，说明该样本刚被模块一放进来，还没学到有效权重
+    #     # =====================================================================
+    #     sim_anchor = F.cosine_similarity(z_prev, z_uni, dim=-1)
+    #     mature_mask = (sim_anchor < 0.99).float() # 1表示成熟可约束，0表示刚引入需自由探索
+
+    #     # 采用余弦距离计算 (Distance = 1 - Cosine Similarity)
+    #     # 注意这里把 joint_emb_factual 换成了 z_factual
+    #     d_pos = 1.0 - F.cosine_similarity(z_factual, z_prev, dim=-1)
+    #     d_neg = 1.0 - F.cosine_similarity(z_factual, z_uni, dim=-1)
+        
+    #     # 计算基于间隔(Margin)的对比损失: max(0, d_pos - d_neg + gamma)
+    #     margin = self.args.csc_gamma
+    #     loss_per_sample = torch.clamp(d_pos - d_neg + margin, min=0.0)
+    #     # 应用成熟度掩码，只对成熟样本计算 CSC Loss
+    #     loss_csc = (loss_per_sample * mature_mask).mean()
+    #     # loss_csc = torch.clamp(d_pos - d_neg + margin, min=0.0).mean()
+
+    #     # 计算时间衰减平滑系数 lambda(t)
+    #     # ======== 修复：CSC 模块的延迟预热 (Warm-up) 机制 ========
+    #     if epoch < 10:
+    #         # 前 10 个 Epoch 绝对不干预！
+    #         # 让模型靠基础 Loss 自由探索，建立起健康的、摆脱了均匀分布的正向历史锚点 (W_avg)
+    #         lambda_t = 0.0  
+    #     else:
+    #         # 10 轮之后，健康的锚点已经成型
+    #         # 此时逐渐加大约束力度，防止模型在后续训练中震荡或灾难性遗忘
+    #         lambda_t = self.args.csc_lambda_0 * ((epoch - 10) / (total_epochs - 10))
+    #     # lambda_t = self.args.csc_lambda_0 * math.exp(-self.args.csc_eta * (epoch / total_epochs))
+
+    #     # 更新历史权重 buffer，供下一个 Epoch 使用 (记得 detach)
+    #     self.alpha_prev[input_idx] = alpha_t.detach()
+
+    #     return lambda_t * loss_csc
 
     def _register_grad_hooks(self, embs_dict):
         """利用 Hook 在反向传播时自动捕获并更新 D_j"""
