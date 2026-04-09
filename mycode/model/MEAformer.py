@@ -137,13 +137,24 @@ class MEAformer(nn.Module):
             
             # ====== 核心创新：软加权 (Soft Weighting) 调度 ======
             if self.args.use_sample_schedule == 1 and self.training:
-                # 计算当前 Epoch 的平滑阈值
+                # 1.计算当前 Epoch 的平滑阈值
                 threshold = 1 - math.exp(-self.args.k * epoch / total_epochs)
+                # 2. 计算标准的软权重
+                sample_weights = torch.exp(- (difficulties - threshold).clamp(min=0))
+                
+                # 3. 【新增】设定绝对噪声天花板 (Noise Ceiling)
+                # DBP15K 数据集中，难度极高(>0.85)的通常是纯噪声或严重缺失特征的实体
+                noise_ceiling = 0.85 
+                
+                # 凡是难度大于天花板的样本，直接给它套上一个强惩罚（或者直接设为0）
+                # 这里我们使用硬截断（Hard Mask），超过 0.85 的样本权重直接归零，防止后期毒害模型
+                noise_mask = (difficulties <= noise_ceiling).float()
+                sample_weights = sample_weights * noise_mask
                 
                 # 【绝妙公式】：(difficulties - threshold).clamp(min=0)
                 # 难度比阈值低，结果为0，exp(0)=1，权重为1，全盘吸收！
                 # 难度比阈值高，差值越大，exp(-差值) 越接近 0，实现软惩罚！
-                sample_weights = torch.exp(- (difficulties - threshold).clamp(min=0))
+                # sample_weights = torch.exp(- (difficulties - threshold).clamp(min=0))
             # ===================================================
         else:  # 测试数据（无难度信息）
             batch_tensor = torch.tensor(input_batch, dtype=torch.int64, device=device)

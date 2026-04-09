@@ -641,7 +641,10 @@ if __name__ == '__main__':
     print(f"  模块三 (反事实Loss): {'开启' if cfgs.use_csc else '关闭'} (lambda_0={cfgs.csc_lambda_0})")
     # ==================================
 
-
+    # ====== 新增：在参数单里加上 TensorBoard 相对目录 ======
+    print("-" * 30)
+    print(f"  📊 TensorBoard 实验主目录: dump/{cfgs.exp_id}/tensorboard/")
+    # ======================================================
 
     print("="*60 + "\n")
     
@@ -665,6 +668,12 @@ if __name__ == '__main__':
         comment = f'bath_size={cfgs.batch_size} exp_id={cfgs.exp_id}'
         if not cfgs.no_tensorboard and not cfgs.only_test:
             writer = SummaryWriter(log_dir=os.path.join(logger_path, 'tensorboard', cfgs.time_stamp), comment=comment)
+            # ====== 新增：高亮打印 TensorBoard 路径 ======
+            print("\n" + "🚀"*20)
+            print(f"✅ 本次实验的 TensorBoard 绝对路径为:\n  {writer.log_dir}")
+            print("  运行命令: tensorboard --logdir " + writer.log_dir + " --port 6006")
+            print("🚀"*20 + "\n")
+            # ============================================
 
     cfgs.device = torch.device(cfgs.device)
 
