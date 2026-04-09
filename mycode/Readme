@@ -30,7 +30,10 @@ pkill -9 -u hwx -f "python main.py"
 查看参数是否修改并且保存
 grep "epoch" run_meaformer.sh
 简单测试
-bash run_meaformer.sh 0 FBDB15K norm 0.2 0
+nohup bash run_meaformer.sh 0 FBDB15K norm 0.2 0 > test_part1debug1.out 2>&1 &
+
+nohup bash run_meaformerpart1.sh 2 FBDB15K norm 0.2 0 > test_part1.out 2>&1 &
+
 bash run_meaformer.sh 1 FBDB15K norm 0.2 0 > test.out 2>&1 &
 nohup bash run_meaformer_il.sh 1 FBDB15K norm 0.2 0 > test_il.out 2>&1 &
 bash run_meaformerpart1.sh 3 FBDB15K norm 0.2 0 > test_part1.out 2>&1 &
@@ -61,7 +64,7 @@ tensorboard打开方式
 第一步：在远程服务器上启动 TensorBoard
 在远程服务器的终端里，进入你的项目根目录，运行以下命令：
 # 请将路径替换为你实际的 tensorboard 文件夹路径，例如 data/mmkg/dump/tensorboard
-tensorboard --logdir ../../data/mmkg/dump/tensorboard --port 6006
+tensorboard --logdir /data0/hwx/mmea_copy/data/mmkg/dump --port 6006
 启动成功后，终端会显示类似这样的提示：TensorBoard 2.x.x at http://localhost:6006/ (Press CTRL+C to quit)。这时候把它放在那，不要关闭这个终端。
 第二步：在你的本地电脑上做端口映射 (SSH 隧道)
 点击 VS Code 底部状态栏的 "PORTS" (端口) 标签。
