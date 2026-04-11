@@ -34,10 +34,12 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --use_intermediate 1   \
             --il            \
 	        --il_start      500 \
+            --use_sample_schedule 1 \
+            --k 10 \
             --use_causal_bias 0 \
             --causal_lambda 0.1 \
             --causal_eval_k 10 \
-            --use_csc 1 \
+            --use_csc 0 \
             --csc_lambda_0 1.0 \
             --csc_gamma 0.1 \
             --enable_sota \

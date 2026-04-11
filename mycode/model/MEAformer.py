@@ -137,19 +137,39 @@ class MEAformer(nn.Module):
             
             # ====== 核心创新：软加权 (Soft Weighting) 调度 ======
             if self.args.use_sample_schedule == 1 and self.training:
-                # 1.计算当前 Epoch 的平滑阈值
-                threshold = 1 - math.exp(-self.args.k * epoch / total_epochs)
-                # 2. 计算标准的软权重
+                # ======s型曲线========(k=10-12)
+                # 1. 计算当前的训练进度比例 (0.0 ~ 1.0)
+                progress = epoch / total_epochs
+                # 2. 【核心优化】使用 S 型曲线 (Sigmoid) 替代指数曲线
+                # 以 progress = 0.5 为中点。k 值控制 S 曲线中间的陡峭程度。
+                threshold = 1.0 / (1.0 + math.exp(-self.args.k * (progress - 0.5)))
+                
+                # 3. 计算标准的软权重
                 sample_weights = torch.exp(- (difficulties - threshold).clamp(min=0))
                 
-                # 3. 【新增】设定绝对噪声天花板 (Noise Ceiling)
-                # DBP15K 数据集中，难度极高(>0.85)的通常是纯噪声或严重缺失特征的实体
+                # 4. 绝对噪声天花板 (坚决保留这个防毒面具)
                 noise_ceiling = 0.85 
-                
-                # 凡是难度大于天花板的样本，直接给它套上一个强惩罚（或者直接设为0）
-                # 这里我们使用硬截断（Hard Mask），超过 0.85 的样本权重直接归零，防止后期毒害模型
                 noise_mask = (difficulties <= noise_ceiling).float()
                 sample_weights = sample_weights * noise_mask
+
+
+                # ======s型曲线结束========
+
+
+                # # ========指数函数曲线================(k=0.5)
+                # # 1.计算当前 Epoch 的平滑阈值
+                # threshold = 1 - math.exp(-self.args.k * epoch / total_epochs)
+                # # 2. 计算标准的软权重
+                # sample_weights = torch.exp(- (difficulties - threshold).clamp(min=0))
+                
+                # # 3. 【新增】设定绝对噪声天花板 (Noise Ceiling)
+                # # DBP15K 数据集中，难度极高(>0.85)的通常是纯噪声或严重缺失特征的实体
+                # noise_ceiling = 0.85 
+                # # 凡是难度大于天花板的样本，直接给它套上一个强惩罚（或者直接设为0）
+                # # 这里我们使用硬截断（Hard Mask），超过 0.85 的样本权重直接归零，防止后期毒害模型
+                # noise_mask = (difficulties <= noise_ceiling).float()
+                # sample_weights = sample_weights * noise_mask
+                # # ========指数函数曲线结束================
                 
                 # 【绝妙公式】：(difficulties - threshold).clamp(min=0)
                 # 难度比阈值低，结果为0，exp(0)=1，权重为1，全盘吸收！

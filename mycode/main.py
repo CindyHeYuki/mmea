@@ -406,8 +406,12 @@ class Runner:
             self.curr_loss_dic[key] = 0.
 
         # ====== 新增调度阈值监控 ======
-        threshold = 1 - math.exp(-self.args.k * self.epoch / self.args.epoch)
-        self.writer.add_scalar("scheduler/threshold", threshold, self.step)
+        progress = self.epoch / self.args.epoch
+        threshold = 1.0 / (1.0 + math.exp(-self.args.k * (progress - 0.5)))
+        self.writer.add_scalar('scheduler/threshold', threshold, self.step) # global_step 或你自己的步数变量
+
+        # threshold = 1 - math.exp(-self.args.k * self.epoch / self.args.epoch)
+        # self.writer.add_scalar("scheduler/threshold", threshold, self.step)
 
         # ====== 新增样本难度分布监控 ======
         if hasattr(self, 'batch_difficulties'):

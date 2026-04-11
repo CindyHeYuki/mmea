@@ -12,6 +12,10 @@ mkdir -p ${LOG_DIR}
 echo "===== 本批次实验开始 ====="
 echo "所有日志将保存在: ${LOG_DIR}"
 
+
+# ==========================================
+# FBDB15K / FBYG15K 实验 (w/o surface)
+# ==========================================
 # # w/o surface
 # FBDB15K
 echo "Running FBDB15K norm 0.8 wo_surf..."
@@ -33,6 +37,12 @@ bash run_meaformer.sh 0 FBYG15K norm 0.5 0 > ${LOG_DIR}/FBYG15K_norm_0.5_wo_surf
 echo "Running FBYG15K norm 0.2 wo_surf..."
 bash run_meaformer.sh 0 FBYG15K norm 0.2 0 > ${LOG_DIR}/FBYG15K_norm_0.2_wo_surf.log 2>&1
 
+
+
+# ==========================================
+# DBP15K 实验
+# ==========================================
+
 # DBP15K (w/o surface)
 echo "Running DBP15K zh_en 0.3 wo_surf..."
 bash run_meaformer.sh 0 DBP15K zh_en 0.3 0 > ${LOG_DIR}/DBP15K_zh_en_0.3_wo_surf.log 2>&1
@@ -42,6 +52,7 @@ bash run_meaformer.sh 0 DBP15K ja_en 0.3 0 > ${LOG_DIR}/DBP15K_ja_en_0.3_wo_surf
 
 echo "Running DBP15K fr_en 0.3 wo_surf..."
 bash run_meaformer.sh 0 DBP15K fr_en 0.3 0 > ${LOG_DIR}/DBP15K_fr_en_0.3_wo_surf.log 2>&1
+
 
 # # w/ surface
 # DBP15K (w/ surface)

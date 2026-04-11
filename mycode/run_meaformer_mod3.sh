@@ -21,7 +21,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
 	        --csls          \
 	        --csls_k        3 \
 	        --random_seed   42 \
-            --exp_name      mod1_$5_500-Norm \
+            --exp_name      mod3_$5_500-Norm \
             --exp_id        v1_$3_$4 \
             --workers       12 \
             --dist          0 \
@@ -39,12 +39,12 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --use_surface   $5     \
             --use_intermediate 1   \
             --replay 0 \
-            --use_sample_schedule 1 \
+            --use_sample_schedule 0 \
             --k 10 \
             --use_causal_bias 0 \
             --causal_lambda 0.1 \
             --causal_eval_k 10 \
-            --use_csc 0 \
+            --use_csc 1 \
             --csc_lambda_0 5 \
             --csc_gamma 0.5 \
             # --exp_id "mod1_S_curve" \

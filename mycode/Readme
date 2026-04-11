@@ -21,6 +21,10 @@ CUDA_VISIBLE_DEVICES=1 nohup bash run_gpu1.sh > nohup_gpu1.out 2>&1 &
 
 CUDA_VISIBLE_DEVICES=0 nohup bash run_gpu0.sh > nohup_gpu0.out 2>&1 &
 
+nohup bash run_il.sh > nohup_il.out 2>&1 &
+
+nohup bash run_gpu1_mod3.sh > nohup_gpu1_mod3.out 2>&1 &
+
 停止
 kill -9 -$!
 
@@ -30,7 +34,9 @@ pkill -9 -u hwx -f "python main.py"
 查看参数是否修改并且保存
 grep "epoch" run_meaformer.sh
 简单测试
-nohup bash run_meaformer.sh 0 FBDB15K norm 0.2 0 > test_part1debug1.out 2>&1 &
+nohup bash run_meaformer.sh 0 FBDB15K norm 0.2 0 > test_part3debug1.out 2>&1 &
+
+nohup bash run_meaformer.sh 0 FBDB15K norm 0.2 0 > test_mod1_S_curve.out 2>&1 &
 
 nohup bash run_meaformerpart1.sh 2 FBDB15K norm 0.2 0 > test_part1.out 2>&1 &
 
