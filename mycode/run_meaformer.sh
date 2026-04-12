@@ -1,9 +1,11 @@
 #!/bin/bash
+export HF_ENDPOINT=https://hf-mirror.com
 # 在脚本最开头添加
 echo "===== DEBUG INFO ====="
 echo "当前目录: $(pwd)"
 echo "脚本参数: $0 $@"
 echo "===== DEBUG INFO END ====="
+export TOKENIZERS_PARALLELISM=false
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --gpu           $1    \
@@ -21,7 +23,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
 	        --csls          \
 	        --csls_k        3 \
 	        --random_seed   42 \
-            --exp_name      mod1_$5_500-Norm \
+            --exp_name      plm_$5_500-Norm \
             --exp_id        v1_$3_$4 \
             --workers       12 \
             --dist          0 \
@@ -36,7 +38,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --structure_encoder "gat" \
             --num_attention_heads 1 \
             --num_hidden_layers 1 \
-            --use_surface   $5     \
+            --use_surface   1     \
             --use_intermediate 1   \
             --replay 0 \
             --use_sample_schedule 1 \
@@ -44,10 +46,12 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --use_causal_bias 0 \
             --causal_lambda 0.1 \
             --causal_eval_k 10 \
-            --use_csc 0 \
+            --use_csc 1 \
             --csc_lambda_0 5 \
             --csc_gamma 0.5 \
-            # --exp_id "mod1_S_curve" \
+            --use_plm 1 \
+            --plm_name '/data0/hwx/mmea_copy/models/bert-base-multilingual-cased' \
+            --freeze_plm 1 \
 
             #--enable_sota \
             

@@ -63,6 +63,20 @@ class cfg():
         parser.add_argument("--csc_gamma", default=0.1, type=float, help="反事实对比的间隔 Margin")
         # =============================================
 
+        # ====== 新增：预训练语言模型 (PLM) 模块参数 ======
+        parser.add_argument("--use_plm", default=1, type=int, choices=[0, 1], 
+                            help="是否启用PLM来替代传统的GloVe名称特征 (1: 开启, 0: 关闭)")
+        parser.add_argument("--plm_name", default="bert-base-multilingual-cased", type=str, 
+                            help="HuggingFace模型名称, 高度推荐用多语言模型, 支持 bert, roberta, xlm-roberta 等")
+        parser.add_argument("--plm_max_len", default=16, type=int, 
+                            help="文本最大截断长度 (实体名字一般较短，16或32即可)")
+        parser.add_argument("--freeze_plm", default=1, type=int, choices=[0, 1], 
+                            help="是否冻结PLM的参数。由于图节点庞大，推荐为1防OOM。投影层将保持可训练。")
+        parser.add_argument("--plm_hidden_dim", default=768, type=int, 
+                            help="PLM的输出维度 (bert-base通常为768)")
+        # =================================================
+        
+
 
         # TODO: add some dynamic variable
         parser.add_argument("--model_name", default="MEAformer", type=str, choices=["EVA", "MCLEA", "MSNEA", "MEAformer"], help="model name")
@@ -185,12 +199,29 @@ class cfg():
         if self.cfg.data_choice in ["FBYG15K", "FBDB15K"]:
             self.cfg.use_intermediate = 0
             self.cfg.data_split = "norm"
-            self.cfg.inner_view_num = 4
-            # assert self.cfg.data_rate in [0.2, 0.5, 0.8]
-            self.cfg.w_name = False
-            self.cfg.w_char = False
-            self.cfg.use_surface = 0
+            
+            # ====== 修改：动态响应命令行的 use_surface 参数 ======
+            if self.cfg.use_surface == 1:
+                self.cfg.inner_view_num = 6  # 凑齐 6 个视图 (图,关系,属性,图,名字,字符)
+                self.cfg.w_name = True
+                self.cfg.w_char = True
+            else:
+                self.cfg.inner_view_num = 4
+                self.cfg.w_name = False
+                self.cfg.w_char = False
+            # ====================================================
+            
             data_split_name = f"{self.cfg.data_rate}_"
+
+        # if self.cfg.data_choice in ["FBYG15K", "FBDB15K"]:
+        #     self.cfg.use_intermediate = 0
+        #     self.cfg.data_split = "norm"
+        #     self.cfg.inner_view_num = 4
+        #     # assert self.cfg.data_rate in [0.2, 0.5, 0.8]
+        #     self.cfg.w_name = False
+        #     self.cfg.w_char = False
+        #     self.cfg.use_surface = 0
+        #     data_split_name = f"{self.cfg.data_rate}_"
         else:
             data_split_name = f"{self.cfg.data_split}_"
             if self.cfg.w_name and self.cfg.w_char:

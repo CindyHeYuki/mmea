@@ -25,6 +25,16 @@ nohup bash run_il.sh > nohup_il.out 2>&1 &
 
 nohup bash run_gpu1_mod3.sh > nohup_gpu1_mod3.out 2>&1 &
 
+bash run_meaformer.sh 3 FBDB15K norm 0.2 0 > test.out 2>&1 &
+
+nohup bash run_meaformer.sh 3 FBDB15K norm 0.2 > test.out 2>&1 &
+
+nohup bash run_EVA.sh 3 FBDB15K norm 0.2 > test_EVA.out 2>&1 &
+
+===================
+迭代学习组
+bash run_meaformer_il.sh 1 FBDB15K norm 0.2 0 > test.out 2>&1 &
+
 停止
 kill -9 -$!
 

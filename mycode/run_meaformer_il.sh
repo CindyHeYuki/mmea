@@ -15,7 +15,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
 	        --csls          \
 	        --csls_k        3 \
 	        --random_seed   42 \
-            --exp_name      IJCAI_MEAformer_sf_$5_500-1000-IL \
+            --exp_name      plm_$5_500-1000-IL \
             --exp_id        v1_$3_$4 \
             --workers       12 \
             --dist          0 \
@@ -36,10 +36,13 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
 	        --il_start      500 \
             --use_sample_schedule 1 \
             --k 10 \
-            --use_causal_bias 0 \
+            --use_causal_bias 1 \
             --causal_lambda 0.1 \
             --causal_eval_k 10 \
-            --use_csc 0 \
+            --use_csc 1 \
             --csc_lambda_0 1.0 \
             --csc_gamma 0.1 \
+            --use_plm 1 \
+            --plm_name '/data0/hwx/mmea_copy/models/bert-base-multilingual-cased' \
+            --freeze_plm 1 \
             --enable_sota \

@@ -303,28 +303,6 @@ class Runner:
             loss, output = self.model(batch_dict, epoch=self.epoch, total_epochs=self.args.epoch)
 
 
-        # #调度？
-        # for batch_dict in self.train_dataloader:
-        #     # ====== 样本筛选 ======
-        #     if 'difficulties' in batch_dict:  # 训练批次包含难度信息
-        #         if self.args.use_sample_schedule == 1:
-        #             # 【开启模块一】执行样本难度过滤
-        #             difficulties = torch.tensor(batch_dict['difficulties'], device=self.args.device)
-        #             mask = difficulties < threshold
-        #             selected_ent1 = batch_dict['ent1'][mask.cpu().numpy()]
-        #             selected_ent2 = batch_dict['ent2'][mask.cpu().numpy()]
-        #             # 如果筛选后批次为空，跳过该批次
-        #             if len(selected_ent1) == 0:
-        #                 continue
-        #         else:
-        #             # 【关闭模块一】不进行过滤，使用当前 batch 的全部样本
-        #             selected_batch = np.column_stack((batch_dict['ent1'], batch_dict['ent2']))
-        #         # 统一输入模型计算 loss
-        #         loss, output = self.model(selected_batch, epoch=self.epoch, total_epochs=self.args.epoch)
-        #     else:  # 测试批次没有难度信息
-        #         # loss, output = self.model(batch_dict)
-        #         loss, output = self.model(batch_dict, epoch=self.epoch, total_epochs=self.args.epoch)
-
             #loss, output = self.model(batch)
             loss = loss / accumulation_steps
             self.scaler.scale(loss).backward()
@@ -644,6 +622,27 @@ if __name__ == '__main__':
     print(f"  模块二 (因果加权): {'开启' if cfgs.use_causal_bias else '关闭'} (lambda={cfgs.causal_lambda})")
     print(f"  模块三 (反事实Loss): {'开启' if cfgs.use_csc else '关闭'} (lambda_0={cfgs.csc_lambda_0})")
     # ==================================
+
+    # ====== 新增：PLM 状态打印 ======
+    print("-" * 30)
+    print("  [预训练语言模型 (PLM) 状态]")
+    
+    # 真实的开启条件：不仅要求 use_plm=1，而且文本特征(w_name)必须是存活的
+    is_plm_active = hasattr(cfgs, 'use_plm') and cfgs.use_plm == 1 and getattr(cfgs, 'w_name', False)
+
+    if is_plm_active:
+        print("  状态: 🟢 开启")
+        print(f"  模型名称: {cfgs.plm_name}")
+        print(f"  冻结参数 (防OOM): {'是' if cfgs.freeze_plm == 1 else '否'}")
+        print(f"  截断长度: {cfgs.plm_max_len}")
+        print(f"  输出维度: {cfgs.plm_hidden_dim}")
+    else:
+        if hasattr(cfgs, 'use_plm') and cfgs.use_plm == 1:
+            print("  状态: 🔴 关闭 (被系统拦截：未开启 --use_surface 1 或 数据集不支持文本)")
+        else:
+            print("  状态: 🔴 关闭 (退回使用默认GloVe或无文本模式)")
+    # ===============================
+
 
     # ====== 新增：在参数单里加上 TensorBoard 相对目录 ======
     print("-" * 30)

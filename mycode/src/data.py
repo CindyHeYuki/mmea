@@ -15,6 +15,8 @@ import torch.distributed
 from tqdm import tqdm
 
 from .utils import get_topk_indices, get_adjr
+from transformers import AutoTokenizer  # 新增导入
+
 
 #New1
 # 添加在文件开头的import之后
@@ -119,6 +121,8 @@ def load_eva_data(logger, args):
 
     name_features = None
     char_features = None
+    plm_input_ids, plm_attention_mask = None, None  # 新增初始化
+
     if args.data_choice == "DBP15K" and (args.w_name or args.w_char):
 
         assert osp.exists(word2vec_path)
@@ -127,6 +131,38 @@ def load_eva_data(logger, args):
         char_features = F.normalize(torch.Tensor(char_features))
         logger.info(f"name feature shape:{name_features.shape}")
         logger.info(f"char feature shape:{char_features.shape}")
+
+    # ====== 新增 PLM 数据加载 ======
+    if hasattr(args, 'use_plm') and args.use_plm == 1:
+        if args.w_name or args.w_char:
+            if args.data_choice == "DBP15K":
+                name_path = os.path.join(args.data_path, "DBP15K", "translated_ent_name", "dbp_" + args.data_split + ".json")
+            elif args.data_choice == "FBDB15K":
+                # 指向你刚刚生成的文件
+                name_path = os.path.join(args.data_path, "FBDB15K", "ent_name.json") 
+            else:
+                name_path = ""
+                
+            if osp.exists(name_path):
+                plm_input_ids, plm_attention_mask = load_plm_tokens(ENT_NUM, name_path, args, logger)
+                
+                # 2. ⚠️ 关键防崩补丁 ⚠️
+                # 动态获取维度，防止与命令行参数冲突
+                char_dim = args.char_dim if hasattr(args, 'char_dim') else 300
+                name_dim = args.name_dim if hasattr(args, 'name_dim') else 300
+                
+                # 补齐字符特征（直接生成 PyTorch 张量）
+                if char_features is None:
+                    char_features = torch.zeros((ENT_NUM, char_dim), dtype=torch.float32)
+                
+                # 补齐名字特征（直接生成 PyTorch 张量）
+                if name_features is None:
+                    name_features = torch.zeros((ENT_NUM, name_dim), dtype=torch.float32)
+                
+            else:
+                logger.info(f"Warning: {name_path} not found. Skipping PLM.")
+    # ===============================
+
 
     if args.unsup:
         mode = args.unsup_mode
@@ -241,7 +277,9 @@ def load_eva_data(logger, args):
         'name_features': name_features,
         'char_features': char_features,
         'input_idx': input_idx,
-        'adj': adj
+        'adj': adj,
+        'plm_input_ids': plm_input_ids,            # 新增返回
+        'plm_attention_mask': plm_attention_mask   # 新增返回
     }, {"left": left_non_train, "right": right_non_train}, train_ill, test_ill, eval_ill, test_ill_
 
 
@@ -289,6 +327,33 @@ def load_char_bigram(path):
                     char2id[word[idx:idx + 2]] = count
                     count += 1
     return ent_names, char2id
+
+def load_plm_tokens(node_size, name_path, args, logger):
+    """
+    加载实体文本名称，并使用HuggingFace分词器处理成PLM的输入张量
+    """
+    logger.info(f"Loading PLM tokenizer from: {args.plm_name}")
+    tokenizer = AutoTokenizer.from_pretrained(args.plm_name)
+    
+    # 复用底层的文本读取逻辑
+    ent_names, _ = load_char_bigram(name_path)
+    
+    text_list = [""] * node_size
+    for i, name_tokens in ent_names:
+        # 将词元列表重新拼接为字符串
+        text_list[i] = " ".join(name_tokens)
+        
+    # 批量执行Tokenization
+    tokens = tokenizer(
+        text_list, 
+        max_length=args.plm_max_len, 
+        padding='max_length', 
+        truncation=True, 
+        return_tensors='pt'
+    )
+    
+    logger.info(f"PLM Tokenization finished. Tensor shape: {tokens['input_ids'].shape}")
+    return tokens['input_ids'], tokens['attention_mask']
 
 
 def load_word_char_features(node_size, word2vec_path, args, logger):

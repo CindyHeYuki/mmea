@@ -15,6 +15,8 @@ from src.utils import pairwise_distances
 import os.path as osp
 import json
 
+from transformers import AutoModel
+
 
 class MEAformer(nn.Module):
     def __init__(self, kgs, args):
@@ -28,9 +30,39 @@ class MEAformer(nn.Module):
         self.att_features = torch.Tensor(kgs["att_features"]).cuda()
         self.name_features = None
         self.char_features = None
+        self.use_plm = (getattr(self.args, "use_plm", 0) == 1) and (kgs.get("plm_input_ids") is not None)
         if kgs["name_features"] is not None:
             self.name_features = kgs["name_features"].cuda()
             self.char_features = kgs["char_features"].cuda()
+
+        # ======= PLM 模型加载逻辑 (跟在上面这块的后面，同样要在最外层) =======
+        if self.use_plm:
+            self.plm_input_ids = kgs["plm_input_ids"].cuda()
+            self.plm_attention_mask = kgs["plm_attention_mask"].cuda()
+            
+            print(f"Loading PLM model [{self.args.plm_name}] into memory...")
+            self.plm = AutoModel.from_pretrained(self.args.plm_name).cuda()
+            
+            # 冻结参数控制
+            if self.args.freeze_plm == 1:
+                for param in self.plm.parameters():
+                    param.requires_grad = False
+                self.plm.eval()
+            
+            # 投影层：将 BERT 的隐藏层维度映射为 MEAformer 需要的文本维度
+            name_dim = self.args.name_dim if hasattr(self.args, 'name_dim') else 300
+            self.plm_proj = nn.Sequential(
+                nn.Linear(self.args.plm_hidden_dim, name_dim),
+                nn.LayerNorm(name_dim)
+            ).cuda()
+            
+            
+            if self.args.freeze_plm == 1:
+                print("Extracting offline PLM features...")
+                # 提取静态的 768 维特征，并强制脱离计算图 (.detach())
+                self.static_plm_features = self._extract_plm_features().detach().cuda()
+        # ===============================================================
+
 
         img_dim = self._get_img_dim(kgs)
 
@@ -73,46 +105,29 @@ class MEAformer(nn.Module):
 
 
     
+    def _extract_plm_features(self):
+        """
+        仅提取底层的 PLM 特征 (768维)，不经过投影层。
+        """
+        is_training = self.plm.training
+        self.plm.eval()
+        all_embs = []
+        batch_size = 512
+        with torch.set_grad_enabled(not self.args.freeze_plm):
+            for i in range(0, self.plm_input_ids.shape[0], batch_size):
+                b_ids = self.plm_input_ids[i : i+batch_size]
+                b_mask = self.plm_attention_mask[i : i+batch_size]
+                outputs = self.plm(input_ids=b_ids, attention_mask=b_mask)
+                cls_emb = outputs.last_hidden_state[:, 0, :] 
+                all_embs.append(cls_emb)
+                
+        plm_features = torch.cat(all_embs, dim=0)
+        if is_training:
+            self.plm.train()
+            
+        # 注意：这里直接返回底层的 BERT 特征，不经过 plm_proj
+        return plm_features
 
-    # def compute_csc_loss(self, input_idx, embs_list, joint_emb_factual, alpha_t, epoch, total_epochs):
-    #     # embs_list: 融合前的模态表示列表 X 
-    #     # joint_emb_factual: 当前步计算出的事实状态表征 z_v_i [cite: 80, 82]
-    #     # alpha_t: 当前步的融合权重 
-        
-    #     batch_size = joint_emb_factual.size(0)
-    #     modal_num = len(embs_list)
-        
-    #     # 堆叠各个模态特征: shape [batch_size, modal_num, hidden_size]
-    #     X = torch.stack(embs_list, dim=1) 
-        
-    #     # --- (2) 正向反事实干预：时序平稳 z_prev_v_i ---
-    #     # 获取历史权重，并使用 detach() 实施因果干预，阻断当前梯度对历史权重的更新 [cite: 87, 88]
-    #     alpha_prev_batch = self.alpha_prev[input_idx].detach() 
-    #     # 计算历史权重下的加权融合表征
-    #     z_prev = torch.sum(alpha_prev_batch.unsqueeze(-1) * X, dim=1) 
-
-    #     # --- (3) 负向反事实干预：因果盲目 z_uni_v_i ---
-    #     # 强制进行均匀融合 [cite: 90, 93]
-    #     z_uni = torch.mean(X, dim=1) 
-
-    #     # --- (4) 计算基于间隔的反事实对比损失 ---
-    #     # 采用余弦距离: distance = 1 - cosine_similarity [cite: 95, 96, 97]
-    #     d_pos = 1.0 - F.cosine_similarity(joint_emb_factual, z_prev, dim=-1)
-    #     d_neg = 1.0 - F.cosine_similarity(joint_emb_factual, z_uni, dim=-1)
-        
-    #     # max(0, d_pos - d_neg + gamma) [cite: 98, 99]
-    #     margin = self.args.csc_gamma
-    #     loss_csc = torch.clamp(d_pos - d_neg + margin, min=0.0).mean()
-
-    #     # --- (5) 计算时间衰减系数 ---
-    #     # lambda_t = lambda_0 * exp(-eta * t / T) [cite: 101, 102]
-    #     lambda_t = self.args.csc_lambda_0 * math.exp(-self.args.csc_eta * (epoch / total_epochs))
-
-    #     # --- 更新历史权重 ---
-    #     # 使用当前步的权重更新 buffer（动量更新或直接替换均可，此处为直接替换以吻合论文"上一训练步骤"的设定）
-    #     self.alpha_prev[input_idx] = alpha_t.detach()
-
-    #     return lambda_t * loss_csc
 
 
     def forward(self, input_batch, epoch=0, total_epochs=1):
@@ -557,25 +572,29 @@ class MEAformer(nn.Module):
     def joint_emb_generat(self, only_joint=True, epoch=0, total_epochs=1):
         # 计算因果偏置
         causal_bias = self._compute_causal_bias(epoch, total_epochs)
+        # ====== 新增：动态加载 PLM 文本特征 ======
+        current_name_features = self.name_features
+        if getattr(self, "use_plm", False):
+            if self.args.freeze_plm == 1:
+                # 冻结模式：使用预存的 768 维静态特征，但每次前向传播都要动态经过投影层
+                current_name_features = F.normalize(self.plm_proj(self.static_plm_features), dim=1)
+            else:
+                # 微调模式：每次前向传播都重新过一遍完整 PLM 和投影层
+                plm_feats = self._extract_plm_features()
+                current_name_features = F.normalize(self.plm_proj(plm_feats), dim=1)
+        # ==========================================
         gph_emb, img_emb, rel_emb, att_emb, \
             name_emb, char_emb, joint_emb, hidden_states, weight_norm = self.multimodal_encoder(
                 self.input_idx, self.adj, self.img_features, self.rel_features, 
-                self.att_features, self.name_features, self.char_features,
-                causal_bias=causal_bias # 传入偏置
+                self.att_features, current_name_features, self.char_features,
+                causal_bias=causal_bias 
             )
+
         # 绑定梯度捕获 (只在重新生成嵌入时挂载 Hook)
         embs_dict = {'img': img_emb, 'att': att_emb, 'rel': rel_emb, 
                      'gph': gph_emb, 'name': name_emb, 'char': char_emb}
         self._register_grad_hooks(embs_dict)
-        
-        # gph_emb, img_emb, rel_emb, att_emb, \
-        #     name_emb, char_emb, joint_emb, hidden_states, weight_norm = self.multimodal_encoder(self.input_idx,
-        #                                                                                         self.adj,
-        #                                                                                         self.img_features,
-        #                                                                                         self.rel_features,
-        #                                                                                         self.att_features,
-        #                                                                                         self.name_features,
-        #                                                                                         self.char_features)
+
         if only_joint:
             return joint_emb, weight_norm
         else:
