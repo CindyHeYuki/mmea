@@ -350,20 +350,25 @@ class Runner:
             self.causal_bias_log = output['causal_bias']
             self.causal_Cj_log = output['causal_Cj']
 
+
     def update_loss_log(self):
         vis_dict = {"train_loss": self.curr_loss}
         vis_dict.update(self.curr_loss_dic)
         self.writer.add_scalars("loss", vis_dict, self.step)
 
+        weight_str = "" # 记录权重的字符串
         if self.weight is not None:
             weight_dic = {}
             weight_dic["img"] = self.weight[0]
             weight_dic["attr"] = self.weight[1]
             weight_dic["rel"] = self.weight[2]
             weight_dic["graph"] = self.weight[3]
-            if self.args.w_name or self.args.w_char:
+            if len(self.weight) >= 6:
                 weight_dic["name"] = self.weight[4]
                 weight_dic["char"] = self.weight[5]
+                weight_str = f"W:[img:{self.weight[0]:.3f}, att:{self.weight[1]:.3f}, rel:{self.weight[2]:.3f}, gph:{self.weight[3]:.3f}, name:{self.weight[4]:.3f}, char:{self.weight[5]:.3f}]"
+            else:
+                weight_str = f"W:[img:{self.weight[0]:.3f}, att:{self.weight[1]:.3f}, rel:{self.weight[2]:.3f}, gph:{self.weight[3]:.3f}]"
             self.writer.add_scalars("modal_weight", weight_dic, self.step)
 
         if self.loss_weight is not None and self.loss_weight != [1, 1]:
@@ -372,29 +377,89 @@ class Runner:
             weight_dic["kpi"] = 1 / (self.loss_weight[1]**2)
             self.writer.add_scalars("loss_weight", weight_dic, self.step)
 
-        # ====== 新增：把 Causal Bias 和 C_j 画进 TensorBoard ======
         if hasattr(self, 'causal_bias_log') and self.causal_bias_log is not None:
             self.writer.add_scalars("Causal/Bias_Value", self.causal_bias_log, self.step)
         if hasattr(self, 'causal_Cj_log') and self.causal_Cj_log is not None:
             self.writer.add_scalars("Causal/Inherent_Confidence_Cj", self.causal_Cj_log, self.step)
-        # ==========================================================
+
+
+        # ========================================================================
+        # 🚀 核心新增：将 Loss 细分项和模态权重，在每个 Epoch 结束时打印
+        # ========================================================================
+        # 移除 step % 50 的条件，直接无条件打印（因为这个函数本身就是在 Epoch 结束时调用的）
+        
+        # 1. 拼接所有的 Loss
+        loss_str = f"Loss:[Tot:{self.curr_loss:.3f}"
+        for k, v in self.curr_loss_dic.items():
+            loss_str += f", {k}:{v:.4f}"
+        loss_str += "]"
+        
+        # 2. 拼接因果参数 (如果你开了 Causal 模块的话)
+        causal_str = ""
+        if hasattr(self, 'causal_bias_log') and self.causal_bias_log is not None:
+            causal_str = f" | Bias: { {k: round(v, 4) for k,v in self.causal_bias_log.items()} }"
+
+        # 3. 写入 logger
+        self.logger.info(f"Ep [{self.epoch}/{self.args.epoch}] Step [{self.step}] | {loss_str} | {weight_str}{causal_str}")
+        # ========================================================================
+
 
         self.curr_loss = 0.
         for key in self.curr_loss_dic:
             self.curr_loss_dic[key] = 0.
 
-        # ====== 新增调度阈值监控 ======
         progress = self.epoch / self.args.epoch
         threshold = 1.0 / (1.0 + math.exp(-self.args.k * (progress - 0.5)))
-        self.writer.add_scalar('scheduler/threshold', threshold, self.step) # global_step 或你自己的步数变量
+        self.writer.add_scalar('scheduler/threshold', threshold, self.step) 
 
-        # threshold = 1 - math.exp(-self.args.k * self.epoch / self.args.epoch)
-        # self.writer.add_scalar("scheduler/threshold", threshold, self.step)
-
-        # ====== 新增样本难度分布监控 ======
         if hasattr(self, 'batch_difficulties'):
             avg_difficulty = torch.mean(self.batch_difficulties).item()
             self.writer.add_scalar("scheduler/avg_difficulty", avg_difficulty, self.step)
+    # def update_loss_log(self):
+    #     vis_dict = {"train_loss": self.curr_loss}
+    #     vis_dict.update(self.curr_loss_dic)
+    #     self.writer.add_scalars("loss", vis_dict, self.step)
+
+    #     if self.weight is not None:
+    #         weight_dic = {}
+    #         weight_dic["img"] = self.weight[0]
+    #         weight_dic["attr"] = self.weight[1]
+    #         weight_dic["rel"] = self.weight[2]
+    #         weight_dic["graph"] = self.weight[3]
+    #         if self.args.w_name or self.args.w_char:
+    #             weight_dic["name"] = self.weight[4]
+    #             weight_dic["char"] = self.weight[5]
+    #         self.writer.add_scalars("modal_weight", weight_dic, self.step)
+
+    #     if self.loss_weight is not None and self.loss_weight != [1, 1]:
+    #         weight_dic = {}
+    #         weight_dic["mask"] = 1 / (self.loss_weight[0]**2)
+    #         weight_dic["kpi"] = 1 / (self.loss_weight[1]**2)
+    #         self.writer.add_scalars("loss_weight", weight_dic, self.step)
+
+    #     # ====== 新增：把 Causal Bias 和 C_j 画进 TensorBoard ======
+    #     if hasattr(self, 'causal_bias_log') and self.causal_bias_log is not None:
+    #         self.writer.add_scalars("Causal/Bias_Value", self.causal_bias_log, self.step)
+    #     if hasattr(self, 'causal_Cj_log') and self.causal_Cj_log is not None:
+    #         self.writer.add_scalars("Causal/Inherent_Confidence_Cj", self.causal_Cj_log, self.step)
+    #     # ==========================================================
+
+    #     self.curr_loss = 0.
+    #     for key in self.curr_loss_dic:
+    #         self.curr_loss_dic[key] = 0.
+
+    #     # ====== 新增调度阈值监控 ======
+    #     progress = self.epoch / self.args.epoch
+    #     threshold = 1.0 / (1.0 + math.exp(-self.args.k * (progress - 0.5)))
+    #     self.writer.add_scalar('scheduler/threshold', threshold, self.step) # global_step 或你自己的步数变量
+
+    #     # threshold = 1 - math.exp(-self.args.k * self.epoch / self.args.epoch)
+    #     # self.writer.add_scalar("scheduler/threshold", threshold, self.step)
+
+    #     # ====== 新增样本难度分布监控 ======
+    #     if hasattr(self, 'batch_difficulties'):
+    #         avg_difficulty = torch.mean(self.batch_difficulties).item()
+    #         self.writer.add_scalar("scheduler/avg_difficulty", avg_difficulty, self.step)
 
 
 
@@ -600,56 +665,58 @@ if __name__ == '__main__':
     cfg.get_args()
     cfgs = cfg.update_train_configs()
 
-    ##################################################
-    # 添加参数检查
-    ##################################################
-    print("\n" + "="*60)
-    print("参数检查:")
-    print(f"  GPU设备: {cfgs.gpu}")
-    print(f"  Epoch数: {cfgs.epoch} ")
-    print(f"  Batch大小: {cfgs.batch_size} ")
-    print(f"  数据集: {cfgs.data_choice}")
-    print(f"  数据分割: {cfgs.data_split}")
-    print(f"  数据比例: {cfgs.data_rate}")
-    print(f"  是否使用表面特征: {cfgs.use_surface}")
-    print(f"  实验名称: {cfgs.exp_name}")
-    print(f"  实验ID: {cfgs.exp_id}")
 
-    # ====== 建议加上的消融实验参数 ======
-    print("-" * 30)
-    print("  [消融实验模块状态]")
-    print(f"  模块一 (样本调度): {'开启' if cfgs.use_sample_schedule else '关闭'} (k={cfgs.k})")
-    print(f"  模块二 (因果加权): {'开启' if cfgs.use_causal_bias else '关闭'} (lambda={cfgs.causal_lambda})")
-    print(f"  模块三 (反事实Loss): {'开启' if cfgs.use_csc else '关闭'} (lambda_0={cfgs.csc_lambda_0})")
-    # ==================================
 
-    # ====== 新增：PLM 状态打印 ======
-    print("-" * 30)
-    print("  [预训练语言模型 (PLM) 状态]")
+    # ##################################################
+    # # 添加参数检查
+    # ##################################################
+    # print("\n" + "="*60)
+    # print("参数检查:")
+    # print(f"  GPU设备: {cfgs.gpu}")
+    # print(f"  Epoch数: {cfgs.epoch} ")
+    # print(f"  Batch大小: {cfgs.batch_size} ")
+    # print(f"  数据集: {cfgs.data_choice}")
+    # print(f"  数据分割: {cfgs.data_split}")
+    # print(f"  数据比例: {cfgs.data_rate}")
+    # print(f"  是否使用表面特征: {cfgs.use_surface}")
+    # print(f"  实验名称: {cfgs.exp_name}")
+    # print(f"  实验ID: {cfgs.exp_id}")
+
+    # # ====== 建议加上的消融实验参数 ======
+    # print("-" * 30)
+    # print("  [消融实验模块状态]")
+    # print(f"  模块一 (样本调度): {'开启' if cfgs.use_sample_schedule else '关闭'} (k={cfgs.k})")
+    # print(f"  模块二 (因果加权): {'开启' if cfgs.use_causal_bias else '关闭'} (lambda={cfgs.causal_lambda})")
+    # print(f"  模块三 (反事实Loss): {'开启' if cfgs.use_csc else '关闭'} (lambda_0={cfgs.csc_lambda_0})")
+    # # ==================================
+
+    # # ====== 新增：PLM 状态打印 ======
+    # print("-" * 30)
+    # print("  [预训练语言模型 (PLM) 状态]")
     
-    # 真实的开启条件：不仅要求 use_plm=1，而且文本特征(w_name)必须是存活的
-    is_plm_active = hasattr(cfgs, 'use_plm') and cfgs.use_plm == 1 and getattr(cfgs, 'w_name', False)
+    # # 真实的开启条件：不仅要求 use_plm=1，而且文本特征(w_name)必须是存活的
+    # is_plm_active = hasattr(cfgs, 'use_plm') and cfgs.use_plm == 1 and getattr(cfgs, 'w_name', False)
 
-    if is_plm_active:
-        print("  状态: 🟢 开启")
-        print(f"  模型名称: {cfgs.plm_name}")
-        print(f"  冻结参数 (防OOM): {'是' if cfgs.freeze_plm == 1 else '否'}")
-        print(f"  截断长度: {cfgs.plm_max_len}")
-        print(f"  输出维度: {cfgs.plm_hidden_dim}")
-    else:
-        if hasattr(cfgs, 'use_plm') and cfgs.use_plm == 1:
-            print("  状态: 🔴 关闭 (被系统拦截：未开启 --use_surface 1 或 数据集不支持文本)")
-        else:
-            print("  状态: 🔴 关闭 (退回使用默认GloVe或无文本模式)")
-    # ===============================
+    # if is_plm_active:
+    #     print("  状态: 🟢 开启")
+    #     print(f"  模型名称: {cfgs.plm_name}")
+    #     print(f"  冻结参数 (防OOM): {'是' if cfgs.freeze_plm == 1 else '否'}")
+    #     print(f"  截断长度: {cfgs.plm_max_len}")
+    #     print(f"  输出维度: {cfgs.plm_hidden_dim}")
+    # else:
+    #     if hasattr(cfgs, 'use_plm') and cfgs.use_plm == 1:
+    #         print("  状态: 🔴 关闭 (被系统拦截：未开启 --use_surface 1 或 数据集不支持文本)")
+    #     else:
+    #         print("  状态: 🔴 关闭 (退回使用默认GloVe或无文本模式)")
+    # # ===============================
 
 
-    # ====== 新增：在参数单里加上 TensorBoard 相对目录 ======
-    print("-" * 30)
-    print(f"  📊 TensorBoard 实验主目录: dump/{cfgs.exp_id}/tensorboard/")
-    # ======================================================
+    # # ====== 新增：在参数单里加上 TensorBoard 相对目录 ======
+    # print("-" * 30)
+    # print(f"  📊 TensorBoard 实验主目录: dump/{cfgs.exp_id}/tensorboard/")
+    # # ======================================================
 
-    print("="*60 + "\n")
+    # print("="*60 + "\n")
     
 
 
@@ -667,6 +734,43 @@ if __name__ == '__main__':
     if rank == 0:
         logger = initialize_exp(cfgs)
         logger_path = get_dump_path(cfgs)
+        # ====================================================================
+        # 🚀 豪华版实验状态仪表盘 (打印到控制台和 Log 文件)
+        # ====================================================================
+        logger.info("============================================================")
+        logger.info("🚀 [MEAformer 核心实验配置与开关状态] 🚀")
+        logger.info("------------------------------------------------------------")
+        logger.info(f"  📊 数据集: {cfgs.data_choice} (Split: {cfgs.data_split}, Rate: {cfgs.data_rate})")
+        logger.info(f"  💻 GPU设备: {cfgs.gpu}  |  🔥 Epoch: {cfgs.epoch}  |  📦 Batch: {cfgs.batch_size}")
+        logger.info("------------------------------------------------------------")
+        
+        # 1. PLM 状态检查
+        use_plm = getattr(cfgs, 'use_plm', 0)
+        logger.info(f"  [多模态 PLM 语义嵌入状态]")
+        logger.info(f"  总开关 (use_plm)      : {'🟢 开启' if use_plm else '🔴 关闭'}")
+        
+        if use_plm:
+            embed_name = getattr(cfgs, 'plm_embed_name', 0)
+            embed_rel = getattr(cfgs, 'plm_embed_rel', 0)
+            embed_attr = getattr(cfgs, 'plm_embed_attr', 0)
+            
+            logger.info(f"    ├─ 实体名称 (name)  : {'✅ 开启' if embed_name else '❌ 关闭'}")
+            logger.info(f"    ├─ 关系文本 (rel)   : {'✅ 开启' if embed_rel else '❌ 关闭'}")
+            logger.info(f"    ├─ 属性文本 (attr)  : {'✅ 开启' if embed_attr else '❌ 关闭'}")
+            logger.info(f"  模型名称: {getattr(cfgs, 'plm_name', 'None')}")
+            logger.info(f"  参数冻结 (freeze)     : {'❄️ 是 (防OOM)' if getattr(cfgs, 'freeze_plm', 1) else '🔥 否 (全局微调)'}")
+        
+        logger.info("------------------------------------------------------------")
+        
+        # 2. 消融模块状态检查
+        logger.info("  [进阶消融模块状态]")
+        logger.info(f"  S型样本调度 (Sch)     : {'🟢 开启' if getattr(cfgs, 'use_sample_schedule', 0) else '🔴 关闭'}")
+        logger.info(f"  因果偏置 (Causal)     : {'🟢 开启' if getattr(cfgs, 'use_causal_bias', 0) else '🔴 关闭'}")
+        logger.info(f"  反事实防塌陷 (CSC)    : {'🟢 开启' if getattr(cfgs, 'use_csc', 0) else '🔴 关闭'}")
+        logger.info("============================================================")
+        # ====================================================================
+
+        
         cfgs.time_stamp = "{0:%Y-%m-%dT%H-%M-%S/}".format(datetime.now())
         comment = f'bath_size={cfgs.batch_size} exp_id={cfgs.exp_id}'
         if not cfgs.no_tensorboard and not cfgs.only_test:

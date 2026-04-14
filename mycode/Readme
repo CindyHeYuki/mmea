@@ -27,9 +27,24 @@ nohup bash run_gpu1_mod3.sh > nohup_gpu1_mod3.out 2>&1 &
 
 bash run_meaformer.sh 3 FBDB15K norm 0.2 0 > test.out 2>&1 &
 
-nohup bash run_meaformer.sh 3 FBDB15K norm 0.2 > test.out 2>&1 &
 
 nohup bash run_EVA.sh 3 FBDB15K norm 0.2 > test_EVA.out 2>&1 &
+======================================
+nohup bash run_PLM.sh > nohup_PLM.out 2>&1 &
+
+
+
+开PLM name1 rel1 attr1
+bash run_meaformer.sh 3 FBDB15K norm 0.2 1 1 1 1 > test111.out 2>&1 &
+
+开PLM name0 rel1 attr0
+bash run_meaformer.sh 3 FBDB15K norm 0.2 1 0 1 0 > test010.out 2>&1 &
+
+开PLM name0 rel0 attr1
+bash run_meaformer.sh 3 FBDB15K norm 0.2 1 0 0 1 > test001.out 2>&1 &
+
+开PLM name0 rel0 attr1
+bash run_meaformer.sh 3 FBDB15K norm 0.2 1 0 0 1 > test001.out 2>&1 &
 
 ===================
 迭代学习组

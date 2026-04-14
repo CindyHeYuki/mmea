@@ -64,6 +64,7 @@ class cfg():
         # =============================================
 
         # ====== 新增：预训练语言模型 (PLM) 模块参数 ======
+        # ====== PLM 全能控制模块 ======
         parser.add_argument("--use_plm", default=1, type=int, choices=[0, 1], 
                             help="是否启用PLM来替代传统的GloVe名称特征 (1: 开启, 0: 关闭)")
         parser.add_argument("--plm_name", default="bert-base-multilingual-cased", type=str, 
@@ -74,8 +75,18 @@ class cfg():
                             help="是否冻结PLM的参数。由于图节点庞大，推荐为1防OOM。投影层将保持可训练。")
         parser.add_argument("--plm_hidden_dim", default=768, type=int, 
                             help="PLM的输出维度 (bert-base通常为768)")
+       
+        # --- 新增任务细分开关 ---
+        parser.add_argument("--plm_embed_name", default=1, type=int, choices=[0, 1], 
+                            help="是否用PLM做名称(Surface)嵌入")
+        parser.add_argument("--plm_embed_rel", default=0, type=int, choices=[0, 1], 
+                            help="是否用PLM做关系(Relation)文本嵌入")
+        parser.add_argument("--plm_embed_attr", default=0, type=int, choices=[0, 1], 
+                            help="是否用PLM做属性名(Attribute)文本嵌入")
+        # 降维策略
+        parser.add_argument("--plm_reduce_method", default="cls", choices=["cls", "mean"], help="提取特征的方式")
+
         # =================================================
-        
 
 
         # TODO: add some dynamic variable

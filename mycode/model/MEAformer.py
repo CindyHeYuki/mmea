@@ -15,7 +15,7 @@ from src.utils import pairwise_distances
 import os.path as osp
 import json
 
-from transformers import AutoModel
+from transformers import AutoModel, AutoTokenizer
 
 
 class MEAformer(nn.Module):
@@ -35,13 +35,14 @@ class MEAformer(nn.Module):
             self.name_features = kgs["name_features"].cuda()
             self.char_features = kgs["char_features"].cuda()
 
-        # ======= PLM 模型加载逻辑 (跟在上面这块的后面，同样要在最外层) =======
+        # ======= PLM 模型加载逻辑 =======
         if self.use_plm:
             self.plm_input_ids = kgs["plm_input_ids"].cuda()
             self.plm_attention_mask = kgs["plm_attention_mask"].cuda()
             
             print(f"Loading PLM model [{self.args.plm_name}] into memory...")
             self.plm = AutoModel.from_pretrained(self.args.plm_name).cuda()
+            self.plm_tokenizer = AutoTokenizer.from_pretrained(self.args.plm_name) # ⚠️ 新增 Tokenizer
             
             # 冻结参数控制
             if self.args.freeze_plm == 1:
@@ -56,26 +57,69 @@ class MEAformer(nn.Module):
                 nn.LayerNorm(name_dim)
             ).cuda()
             
-            
             if self.args.freeze_plm == 1:
-                print("Extracting offline PLM features...")
-                # 提取静态的 768 维特征，并强制脱离计算图 (.detach())
+                print("Extracting offline PLM features for names...")
                 self.static_plm_features = self._extract_plm_features().detach().cuda()
-        # ===============================================================
+                
+            # ====== 🚀 新增：关系和属性的 PLM 语义提取 ======
+            if getattr(self.args, "plm_embed_rel", 0) == 1 and "rel_texts" in kgs:
+                print("Extracting PLM features for Relations...")
+                # 提取关系文本向量 (1000 x 768)
+                self.rel_text_embs = self._extract_plm_features(kgs["rel_texts"]).detach().cuda()
+                self.rel_plm_proj = nn.Sequential(
+                    nn.Linear(self.args.plm_hidden_dim, self.args.hidden_size),
+                    nn.LayerNorm(self.args.hidden_size)
+                ).cuda()
+                self.raw_rel_features = self.rel_features # 备份实体的稀疏矩阵 [ent_num, 1000]
 
+                # ====== 🔥 核心修复：关系专属残差偏移参数 ======
+                self.rel_id_shift = nn.Parameter(torch.zeros(self.raw_rel_features.shape[1], self.args.hidden_size)).cuda()
+                nn.init.xavier_normal_(self.rel_id_shift)
+
+            if getattr(self.args, "plm_embed_attr", 0) == 1 and "attr_texts" in kgs:
+                print("Extracting PLM features for Attributes...")
+                # 提取属性文本向量 (1000 x 768)
+                self.att_text_embs = self._extract_plm_features(kgs["attr_texts"]).detach().cuda()
+                self.att_plm_proj = nn.Sequential(
+                    nn.Linear(self.args.plm_hidden_dim, self.args.hidden_size),
+                    nn.LayerNorm(self.args.hidden_size)
+                ).cuda()
+                self.raw_att_features = self.att_features # 备份实体的稀疏矩阵 [ent_num, 1000]
+
+                # ====== 🔥 核心修复：属性专属残差偏移参数 ======
+                self.att_id_shift = nn.Parameter(torch.zeros(self.raw_att_features.shape[1], self.args.hidden_size)).cuda()
+                nn.init.xavier_normal_(self.att_id_shift)
+            # ===============================================
 
         img_dim = self._get_img_dim(kgs)
-
         char_dim = kgs["char_features"].shape[1] if self.char_features is not None else 100
+
+        # ⚠️ 修改：动态计算属性特征输入维度 (如果开启 PLM 属性，则为 300 维)
+        attr_input_dim = self.args.hidden_size if (getattr(self.args, "use_plm", 0) == 1 and getattr(self.args, "plm_embed_attr", 0) == 1) else kgs["att_features"].shape[1]
 
         self.multimodal_encoder = MultiModalEncoder(args=self.args,
                                                     ent_num=kgs["ent_num"],
                                                     img_feature_dim=img_dim,
                                                     char_feature_dim=char_dim,
                                                     use_project_head=self.args.use_project_head,
-                                                    attr_input_dim=kgs["att_features"].shape[1])
+                                                    attr_input_dim=attr_input_dim) 
+
+        # ====== 🚀 终极维度对齐补丁 ======
+        # 因为我们已经用 PLM 把关系和属性特征降维且语义化到了 300 维，
+        # 所以必须把 Encoder 底层原本写死的 1000 维接收器替换掉！
+        if getattr(self.args, "use_plm", 0) == 1:
+            if getattr(self.args, "plm_embed_rel", 0) == 1:
+                # 强行覆盖底层关系投影层：300 -> 300
+                self.multimodal_encoder.rel_fc = nn.Linear(self.args.hidden_size, self.args.hidden_size).cuda()
+                
+            if getattr(self.args, "plm_embed_attr", 0) == 1:
+                # 强行覆盖底层属性投影层：300 -> 300 (双保险)
+                if hasattr(self.multimodal_encoder, 'att_fc'):
+                    self.multimodal_encoder.att_fc = nn.Linear(self.args.hidden_size, self.args.hidden_size).cuda()
+        # ==================================
 
         self.multi_loss_layer = CustomMultiLossLayer(loss_num=6)  # 6
+        
         self.criterion_cl = icl_loss(tau=self.args.tau, ab_weight=self.args.ab_weight, n_view=2)
         self.criterion_cl_joint = icl_loss(tau=self.args.tau, ab_weight=self.args.ab_weight, n_view=2, replay=self.args.replay, neg_cross_kg=self.args.neg_cross_kg)
 
@@ -103,29 +147,42 @@ class MEAformer(nn.Module):
         # # 初始化均匀权重，并使用 register_buffer 确保它不参与梯度计算，但能随模型保存
         # self.register_buffer('alpha_prev', torch.ones(args.ent_num, modal_num) / modal_num)
 
-
-    
-    def _extract_plm_features(self):
+    def _extract_plm_features(self, input_texts=None):
         """
-        仅提取底层的 PLM 特征 (768维)，不经过投影层。
+        通用特征提取：
+        如果 input_texts 为空，走原来的实体 tokenization 流程；
+        如果提供了 input_texts，则现场进行分词并提取特征。
         """
         is_training = self.plm.training
         self.plm.eval()
         all_embs = []
         batch_size = 512
+        
         with torch.set_grad_enabled(not self.args.freeze_plm):
-            for i in range(0, self.plm_input_ids.shape[0], batch_size):
-                b_ids = self.plm_input_ids[i : i+batch_size]
-                b_mask = self.plm_attention_mask[i : i+batch_size]
-                outputs = self.plm(input_ids=b_ids, attention_mask=b_mask)
-                cls_emb = outputs.last_hidden_state[:, 0, :] 
-                all_embs.append(cls_emb)
-                
+            if input_texts is not None:
+                # 现场对关系/属性名进行编码
+                device = next(self.plm.parameters()).device
+                for i in range(0, len(input_texts), batch_size):
+                    batch_texts = input_texts[i : i+batch_size]
+                    inputs = self.plm_tokenizer(batch_texts, max_length=self.args.plm_max_len, 
+                                                padding='max_length', truncation=True, return_tensors='pt').to(device)
+                    outputs = self.plm(**inputs)
+                    cls_emb = outputs.last_hidden_state[:, 0, :]
+                    all_embs.append(cls_emb)
+            else:
+                # 原有的实体名称特征提取逻辑
+                for i in range(0, self.plm_input_ids.shape[0], batch_size):
+                    b_ids = self.plm_input_ids[i : i+batch_size]
+                    b_mask = self.plm_attention_mask[i : i+batch_size]
+                    outputs = self.plm(input_ids=b_ids, attention_mask=b_mask)
+                    cls_emb = outputs.last_hidden_state[:, 0, :] 
+                    all_embs.append(cls_emb)
+                    
         plm_features = torch.cat(all_embs, dim=0)
+        
         if is_training:
             self.plm.train()
             
-        # 注意：这里直接返回底层的 BERT 特征，不经过 plm_proj
         return plm_features
 
 
@@ -168,29 +225,6 @@ class MEAformer(nn.Module):
                 sample_weights = sample_weights * noise_mask
 
 
-                # ======s型曲线结束========
-
-
-                # # ========指数函数曲线================(k=0.5)
-                # # 1.计算当前 Epoch 的平滑阈值
-                # threshold = 1 - math.exp(-self.args.k * epoch / total_epochs)
-                # # 2. 计算标准的软权重
-                # sample_weights = torch.exp(- (difficulties - threshold).clamp(min=0))
-                
-                # # 3. 【新增】设定绝对噪声天花板 (Noise Ceiling)
-                # # DBP15K 数据集中，难度极高(>0.85)的通常是纯噪声或严重缺失特征的实体
-                # noise_ceiling = 0.85 
-                # # 凡是难度大于天花板的样本，直接给它套上一个强惩罚（或者直接设为0）
-                # # 这里我们使用硬截断（Hard Mask），超过 0.85 的样本权重直接归零，防止后期毒害模型
-                # noise_mask = (difficulties <= noise_ceiling).float()
-                # sample_weights = sample_weights * noise_mask
-                # # ========指数函数曲线结束================
-                
-                # 【绝妙公式】：(difficulties - threshold).clamp(min=0)
-                # 难度比阈值低，结果为0，exp(0)=1，权重为1，全盘吸收！
-                # 难度比阈值高，差值越大，exp(-差值) 越接近 0，实现软惩罚！
-                # sample_weights = torch.exp(- (difficulties - threshold).clamp(min=0))
-            # ===================================================
         else:  # 测试数据（无难度信息）
             batch_tensor = torch.tensor(input_batch, dtype=torch.int64, device=device)
             difficulties = None
@@ -247,70 +281,6 @@ class MEAformer(nn.Module):
 
         # 总损失
         loss_all = loss_joi + in_loss + out_loss
-
-        # # 统一处理输入格式
-        # if isinstance(input_batch, dict):  # 训练数据（包含难度信息）
-        #     batch_tensor = torch.stack([
-        #         torch.tensor(input_batch['ent1'], dtype=torch.int64, device=device),
-        #         torch.tensor(input_batch['ent2'], dtype=torch.int64, device=device)
-        #     ], dim=1)
-        #     difficulties = torch.tensor(input_batch['difficulties'], device=device)
-        # else:  # 测试数据（无难度信息）
-        #     batch_tensor = torch.tensor(input_batch, dtype=torch.int64, device=device)
-        #     difficulties = None
-
-        # 计算对比损失
-        # if self.args.replay:
-        #     all_ent_batch = torch.cat([batch_tensor[:, 0], batch_tensor[:, 1]])
-            
-        #     if not self.replay_ready:
-        #         # 【修复】传完整的 joint_emb，而不是切片后的 ent_emb
-        #         loss_joi, l_neg, r_neg = self.criterion_cl_joint(joint_emb, batch_tensor)
-        #     else:
-        #         neg_l = self.replay_matrix[batch_tensor[:, 0], self.idx_one[:batch_tensor.shape[0]]]
-        #         neg_r = self.replay_matrix[batch_tensor[:, 1], self.idx_one[:batch_tensor.shape[0]]]
-                
-        #         neg_l_set = set(neg_l.tolist())
-        #         neg_r_set = set(neg_r.tolist())
-        #         all_ent_set = set(all_ent_batch.tolist())
-                
-        #         neg_l_list = list(neg_l_set - all_ent_set)
-        #         neg_r_list = list(neg_r_set - all_ent_set)
-                
-        #         neg_l_ipt = torch.tensor(neg_l_list, dtype=torch.int64, device=device)
-        #         neg_r_ipt = torch.tensor(neg_r_list, dtype=torch.int64, device=device)
-                
-        #         # 【修复】同理，恢复原有的参数签名
-        #         loss_joi, l_neg, r_neg = self.criterion_cl_joint(joint_emb, batch_tensor, neg_l_ipt, neg_r_ipt)
-            
-        #     index = (
-        #         all_ent_batch,
-        #         self.idx_double[:batch_tensor.shape[0] * 2],
-        #     )
-        #     new_value = torch.cat([l_neg, r_neg]).to(device)
-        #     self.replay_matrix = self.replay_matrix.index_put(index, new_value)
-            
-        #     if self.replay_ready == 0:
-        #         num = torch.sum(self.replay_matrix < 0)
-        #         if num == self.last_num:
-        #             self.replay_ready = 1
-        #             print("-----------------------------------------")
-        #             print("begin replay!")
-        #             print("-----------------------------------------")
-        #         else:
-        #             self.last_num = num
-        # else:
-        #     # 【修复】恢复原有传参
-        #     loss_joi = self.criterion_cl_joint(joint_emb, batch_tensor)
-        
-        # # 计算内部视图损失与输出视图损失
-        # # 【修复】安全传入 difficulties：只有在它是字典输入时，才传入 difficulties 参数，防止测试集报错
-        # if difficulties is not None:
-        #     in_loss = self.inner_view_loss(gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, batch_tensor, difficulties=difficulties)
-        #     out_loss = self.inner_view_loss(gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, batch_tensor, difficulties=difficulties)
-        # else:
-        #     in_loss = self.inner_view_loss(gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, batch_tensor)
-        #     out_loss = self.inner_view_loss(gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, batch_tensor)
         
 
         # # 总损失
@@ -368,147 +338,6 @@ class MEAformer(nn.Module):
 
 
 
-        # def forward(self, input_batch):
-        #     # 统一处理输入格式
-        #     if isinstance(input_batch, dict):  # 训练数据（包含难度信息）
-        #         ent_pairs = torch.stack([
-        #             torch.tensor(input_batch['ent1'], device=self.device),
-        #             torch.tensor(input_batch['ent2'], device=self.device)
-        #         ], dim=1)
-        #         difficulties = torch.tensor(input_batch['difficulties'], device=self.device)
-        #     else:  # 测试数据（无难度信息）
-        #         ent_pairs = torch.tensor(input_batch, device=self.device)
-        #         difficulties = None
-            
-        #     # 生成所有实体嵌入
-        #     gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states = self.joint_emb_generat(only_joint=False)
-            
-        #     # 提取当前批次的实体嵌入
-        #     ent1_emb = joint_emb[ent_pairs[:, 0]]
-        #     ent2_emb = joint_emb[ent_pairs[:, 1]]
-            
-        #     # 生成隐藏层嵌入
-        #     gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, joint_emb_hid = self.generate_hidden_emb(hidden_states)
-            
-        #     # 计算对比损失（考虑难度权重）
-        #     if self.args.replay:
-        #         batch_tensor = ent_pairs.clone().detach()
-        #         all_ent_batch = torch.cat([batch_tensor[:, 0], batch_tensor[:, 1]])
-                
-        #         if not self.replay_ready:
-        #             loss_joi, l_neg, r_neg = self.criterion_cl_joint(ent1_emb, ent2_emb, batch_tensor)
-        #         else:
-        #             neg_l = self.replay_matrix[batch_tensor[:, 0], self.idx_one[:batch_tensor.shape[0]]]
-        #             neg_r = self.replay_matrix[batch_tensor[:, 1], self.idx_one[:batch_tensor.shape[0]]]
-                    
-        #             neg_l_set = set(neg_l.tolist())
-        #             neg_r_set = set(neg_r.tolist())
-        #             all_ent_set = set(all_ent_batch.tolist())
-                    
-        #             neg_l_list = list(neg_l_set - all_ent_set)
-        #             neg_r_list = list(neg_r_set - all_ent_set)
-                    
-        #             neg_l_ipt = torch.tensor(neg_l_list, dtype=torch.int64).cuda()
-        #             neg_r_ipt = torch.tensor(neg_r_list, dtype=torch.int64).cuda()
-                    
-        #             loss_joi, l_neg, r_neg = self.criterion_cl_joint(
-        #                 ent1_emb, ent2_emb, batch_tensor, 
-        #                 neg_l_ipt, neg_r_ipt
-        #             )
-                
-        #         index = (
-        #             all_ent_batch,
-        #             self.idx_double[:batch_tensor.shape[0] * 2],
-        #         )
-        #         new_value = torch.cat([l_neg, r_neg]).cuda()
-        #         self.replay_matrix = self.replay_matrix.index_put(index, new_value)
-                
-        #         if self.replay_ready == 0:
-        #             num = torch.sum(self.replay_matrix < 0)
-        #             if num == self.last_num:
-        #                 self.replay_ready = 1
-        #                 print("-----------------------------------------")
-        #                 print("begin replay!")
-        #                 print("-----------------------------------------")
-        #             else:
-        #                 self.last_num = num
-        #     else:
-        #         loss_joi = self.criterion_cl_joint(ent1_emb, ent2_emb, ent_pairs)
-            
-        #     # 计算内部视图损失（考虑难度权重）
-        #     in_loss = self.inner_view_loss(
-        #         gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, 
-        #         ent_pairs, difficulties
-        #     )
-            
-        #     # 计算输出视图损失（考虑难度权重）
-        #     out_loss = self.inner_view_loss(
-        #         gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, 
-        #         name_emb_hid, char_emb_hid, ent_pairs, difficulties
-        #     )
-            
-        #     # 总损失
-        #     loss_all = loss_joi + in_loss + out_loss
-            
-        #     # 准备输出
-        #     loss_dic = {
-        #         "joint_Intra_modal": loss_joi.item(), 
-        #         "Intra_modal": in_loss.item()
-        #     }
-        #     output = {
-        #         "loss_dic": loss_dic, 
-        #         "emb": joint_emb
-        #     }
-            
-        #     return loss_all, output
-
-    # def forward(self, batch):
-    #     gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states = self.joint_emb_generat(only_joint=False)
-    #     gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, joint_emb_hid = self.generate_hidden_emb(hidden_states)
-    #     if self.args.replay:
-    #         batch = torch.tensor(batch, dtype=torch.int64).cuda()
-    #         all_ent_batch = torch.cat([batch[:, 0], batch[:, 1]])
-    #         if not self.replay_ready:
-    #             loss_joi, l_neg, r_neg = self.criterion_cl_joint(joint_emb, batch)
-    #         else:
-    #             neg_l = self.replay_matrix[batch[:, 0], self.idx_one[:batch.shape[0]]]
-    #             neg_r = self.replay_matrix[batch[:, 1], self.idx_one[:batch.shape[0]]]
-    #             neg_l_set = set(neg_l.tolist())
-    #             neg_r_set = set(neg_r.tolist())
-    #             all_ent_set = set(all_ent_batch.tolist())
-    #             neg_l_list = list(neg_l_set - all_ent_set)
-    #             neg_r_list = list(neg_r_set - all_ent_set)
-    #             neg_l_ipt = torch.tensor(neg_l_list, dtype=torch.int64).cuda()
-    #             neg_r_ipt = torch.tensor(neg_r_list, dtype=torch.int64).cuda()
-    #             loss_joi, l_neg, r_neg = self.criterion_cl_joint(joint_emb, batch, neg_l_ipt, neg_r_ipt)
-
-    #         index = (
-    #             all_ent_batch,
-    #             self.idx_double[:batch.shape[0] * 2],
-    #         )
-    #         new_value = torch.cat([l_neg, r_neg]).cuda()
-
-    #         self.replay_matrix = self.replay_matrix.index_put(index, new_value)
-    #         if self.replay_ready == 0:
-    #             num = torch.sum(self.replay_matrix < 0)
-    #             if num == self.last_num:
-    #                 self.replay_ready = 1
-    #                 print("-----------------------------------------")
-    #                 print("begin replay!")
-    #                 print("-----------------------------------------")
-    #             else:
-    #                 self.last_num = num
-    #     else:
-    #         loss_joi = self.criterion_cl_joint(joint_emb, batch)
-
-    #     in_loss = self.inner_view_loss(gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, batch)
-    #     out_loss = self.inner_view_loss(gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, batch)
-
-    #     loss_all = loss_joi + in_loss + out_loss
-
-    #     loss_dic = {"joint_Intra_modal": loss_joi.item(), "Intra_modal": in_loss.item()}
-    #     output = {"loss_dic": loss_dic, "emb": joint_emb}
-    #     return loss_all, output
 
     def generate_hidden_emb(self, hidden):
         gph_emb = F.normalize(hidden[:, 0, :].squeeze(1))
@@ -539,56 +368,59 @@ class MEAformer(nn.Module):
 
         total_loss = self.multi_loss_layer([loss_GCN, loss_rel, loss_att, loss_img, loss_name, loss_char])
         return total_loss
-        # # 如果传入了 difficulties，就打包成参数字典传给底层的 loss 函数
-        # # ====== 新增：拦截 difficulties，防止传给底层报错 ======
-        # difficulties = kwargs.pop('difficulties', None)
-        # # =======================================================
-        # # kwargs = {'difficulties': difficulties} if difficulties is not None else {}
-        
-        # loss_GCN = self.criterion_cl(gph_emb, train_ill, **kwargs) if gph_emb is not None else 0
-        # loss_rel = self.criterion_cl(rel_emb, train_ill, **kwargs) if rel_emb is not None else 0
-        # loss_att = self.criterion_cl(att_emb, train_ill, **kwargs) if att_emb is not None else 0
-        # loss_img = self.criterion_cl(img_emb, train_ill, **kwargs) if img_emb is not None else 0
-        # loss_name = self.criterion_cl(name_emb, train_ill, **kwargs) if name_emb is not None else 0
-        # loss_char = self.criterion_cl(char_emb, train_ill, **kwargs) if char_emb is not None else 0
 
-        # total_loss = self.multi_loss_layer([loss_GCN, loss_rel, loss_att, loss_img, loss_name, loss_char])
-        # return total_loss
-
-    # def inner_view_loss(self, gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, train_ill):
-    #     # pdb.set_trace()
-    #     loss_GCN = self.criterion_cl(gph_emb, train_ill) if gph_emb is not None else 0
-    #     loss_rel = self.criterion_cl(rel_emb, train_ill) if rel_emb is not None else 0
-    #     loss_att = self.criterion_cl(att_emb, train_ill) if att_emb is not None else 0
-    #     loss_img = self.criterion_cl(img_emb, train_ill) if img_emb is not None else 0
-    #     loss_name = self.criterion_cl(name_emb, train_ill) if name_emb is not None else 0
-    #     loss_char = self.criterion_cl(char_emb, train_ill) if char_emb is not None else 0
-
-    #     total_loss = self.multi_loss_layer([loss_GCN, loss_rel, loss_att, loss_img, loss_name, loss_char])
-    #     return total_loss
-
-    # --------- necessary ---------------
 
     def joint_emb_generat(self, only_joint=True, epoch=0, total_epochs=1):
         # 计算因果偏置
         causal_bias = self._compute_causal_bias(epoch, total_epochs)
-        # ====== 新增：动态加载 PLM 文本特征 ======
+        
+        # 默认特征
         current_name_features = self.name_features
+        current_rel_features = self.rel_features
+        current_att_features = self.att_features
+        
         if getattr(self, "use_plm", False):
-            if self.args.freeze_plm == 1:
-                # 冻结模式：使用预存的 768 维静态特征，但每次前向传播都要动态经过投影层
-                current_name_features = F.normalize(self.plm_proj(self.static_plm_features), dim=1)
-            else:
-                # 微调模式：每次前向传播都重新过一遍完整 PLM 和投影层
-                plm_feats = self._extract_plm_features()
-                current_name_features = F.normalize(self.plm_proj(plm_feats), dim=1)
+            # 1. 实体名称嵌入 (Surface)
+            if getattr(self.args, "plm_embed_name", 1) == 1:
+                if self.args.freeze_plm == 1:
+                    current_name_features = F.normalize(self.plm_proj(self.static_plm_features), dim=1)
+                else:
+                    plm_feats = self._extract_plm_features()
+                    current_name_features = F.normalize(self.plm_proj(plm_feats), dim=1)
+            
+            # 2. 关系文本语义嵌入 (Relation)
+            if getattr(self.args, "plm_embed_rel", 0) == 1 and hasattr(self, "rel_plm_proj"):
+                # 得到 1000 个关系的 300 维语义表示
+                rel_semantic = self.rel_plm_proj(self.rel_text_embs)
+                # ====== 🔥 核心修复：语义与结构残差融合 ======
+                rel_fused = rel_semantic + self.rel_id_shift
+                current_rel_features = torch.matmul(self.raw_rel_features, rel_fused)
+                current_rel_features = F.normalize(current_rel_features, dim=1)
+                # # 矩阵乘法：将实体的频次矩阵 [ent_num, 1000] @ 语义矩阵 [1000, 300] = [ent_num, 300]
+                # current_rel_features = torch.matmul(self.raw_rel_features, rel_semantic)
+                # current_rel_features = F.normalize(current_rel_features, dim=1)
+                
+            # 3. 属性文本语义嵌入 (Attribute)
+            if getattr(self.args, "plm_embed_attr", 0) == 1 and hasattr(self, "att_plm_proj"):
+                att_semantic = self.att_plm_proj(self.att_text_embs)
+                # ====== 🔥 核心修复：语义与结构残差融合 ======
+                att_fused = att_semantic + self.att_id_shift
+                current_att_features = torch.matmul(self.raw_att_features, att_fused)
+                current_att_features = F.normalize(current_att_features, dim=1)
+                # # 矩阵乘法：[ent_num, 1000] @ [1000, 300] = [ent_num, 300]
+                # current_att_features = torch.matmul(self.raw_att_features, att_semantic)
+                # current_att_features = F.normalize(current_att_features, dim=1)
         # ==========================================
+
+        # ⚠️ 把替换好的 current_*_features 传入 Encoder
         gph_emb, img_emb, rel_emb, att_emb, \
             name_emb, char_emb, joint_emb, hidden_states, weight_norm = self.multimodal_encoder(
-                self.input_idx, self.adj, self.img_features, self.rel_features, 
-                self.att_features, current_name_features, self.char_features,
+                self.input_idx, self.adj, self.img_features, 
+                current_rel_features, current_att_features, 
+                current_name_features, self.char_features,
                 causal_bias=causal_bias 
             )
+        
 
         # 绑定梯度捕获 (只在重新生成嵌入时挂载 Hook)
         embs_dict = {'img': img_emb, 'att': att_emb, 'rel': rel_emb, 
@@ -721,8 +553,8 @@ class MEAformer(nn.Module):
         loss_csc = d_pos.mean()
 
         # ======== CSC 模块的延迟预热 (Warm-up) 机制 ========
-        if epoch < 10:
-            # 前 10 个 Epoch 绝对不干预！
+        if epoch < 50:
+            # 前 50 个 Epoch 绝对不干预！
             # 让模型靠基础 Loss 自由探索，建立起健康的正向历史锚点
             lambda_t = 0.0  
         else:
@@ -734,141 +566,6 @@ class MEAformer(nn.Module):
 
         return lambda_t * loss_csc
     
-    
-    # def compute_csc_loss(self, input_idx, embs_list, weight_norm, epoch, total_epochs):
-    #     import torch.nn.functional as F
-        
-    #     valid_modal_num = weight_norm.size(-1)
-        
-    #     if weight_norm.dim() == 3:
-    #         alpha_t = weight_norm.mean(dim=1) 
-    #     else:
-    #         alpha_t = weight_norm
-
-    #     # 1. 初始化慢速移动的“历史锚点”
-    #     if not hasattr(self, 'alpha_prev') or self.alpha_prev.size(1) != valid_modal_num:
-    #         self.register_buffer('alpha_prev', torch.ones(alpha_t.size(0), valid_modal_num, device=alpha_t.device) / valid_modal_num)
-
-    #     # 负向锚点：永远盲目的均匀分布
-    #     uniform_dist = torch.ones_like(alpha_t) / valid_modal_num
-
-    #     # =====================================================================
-    #     # 🌟 理论升级 1：纯粹的权重空间约束 (Weight Space KL-Divergence)
-    #     # 抛弃高维特征空间的 Cosine 距离，直接用 KL 散度约束注意力的概率分布！
-    #     # 梯度极其平滑、干净，彻底杜绝梯度消失和特征撕裂！
-    #     # =====================================================================
-    #     # d_pos: 当前权重离“历史锚点”有多远？ (要求靠近)
-    #     d_pos = F.kl_div(torch.log(alpha_t + 1e-8), self.alpha_prev.detach(), reduction='none').sum(dim=-1)
-        
-    #     # d_neg: 当前权重离“盲目均匀分布”有多远？ (要求远离)
-    #     d_neg = F.kl_div(torch.log(alpha_t + 1e-8), uniform_dist, reduction='none').sum(dim=-1)
-
-    #     # 🌟 理论升级 2：课程感知掩码 (判断历史锚点是否成熟)
-    #     # 如果历史锚点本身就是均匀分布(KL散度接近0)，说明样本刚进入训练，不予约束
-    #     sim_anchor = F.kl_div(torch.log(self.alpha_prev + 1e-8), uniform_dist, reduction='none').sum(dim=-1)
-    #     mature_mask = (sim_anchor > 0.01).float() 
-
-    #     # 计算 Margin Loss
-    #     margin = self.args.csc_gamma
-    #     loss_per_sample = torch.clamp(d_pos - d_neg + margin, min=0.0)
-        
-    #     # 应用掩码并求平均
-    #     loss_csc = (loss_per_sample * mature_mask).mean()
-
-    #     # 延迟预热 (前 10 轮让模块一自由发挥)
-    #     if epoch < 10:
-    #         lambda_t = 0.0  
-    #     else:
-    #         lambda_t = self.args.csc_lambda_0 * ((epoch - 10) / (total_epochs - 10))
-
-    #     # =====================================================================
-    #     # 💣 致命 Bug 修复：解决“金鱼记忆”问题 (真正的 EMA 慢速更新)
-    #     # 保证 alpha_prev 记录的是真实的跨 Epoch 历史，而不是上一个 Batch 的状态！
-    #     # =====================================================================
-    #     if self.training:
-    #         momentum = 0.999  # 0.95 意味着它记忆了过去约 20 个 Step 的平滑状态
-    #         self.alpha_prev.data = momentum * self.alpha_prev.data + (1.0 - momentum) * alpha_t.detach()
-
-    #     return lambda_t * loss_csc
-    
-    #提供一个健壮的 compute_csc_loss 实现
-    # def compute_csc_loss(self, input_idx, embs_list, weight_norm, epoch, total_epochs):
-    #     import torch.nn.functional as F
-    #     import math
-        
-    #     # 1. 过滤掉被关闭的模态 (值为 None 的特征)
-    #     valid_embs = [emb for emb in embs_list if emb is not None]
-    #     valid_modal_num = len(valid_embs)
-        
-    #     # 沿着维度1堆叠: 形状变为 [ent_num, valid_modal_num, hidden_size]
-    #     X = torch.stack(valid_embs, dim=1)
-
-    #     # =====================================================================
-    #     # 💣 终极拆弹：切断梯度，保护底层特征空间不被撕裂！
-    #     # CSC 模块的作用是“约束注意力权重”，绝不能让梯度流回底层特征去瞎改特征！
-    #     # =====================================================================
-    #     X_detach = X.detach() 
-        
-    #     # 2. 处理 weight_norm (即 alpha_t)
-    #     if weight_norm.dim() == 3:
-    #         alpha_t = weight_norm.mean(dim=1)  # [ent_num, modal_num]
-    #     else:
-    #         alpha_t = weight_norm
-
-    #     # 3. 动态初始化或校准 alpha_prev
-    #     if not hasattr(self, 'alpha_prev') or self.alpha_prev.size(1) != valid_modal_num:
-    #         self.register_buffer('alpha_prev', torch.ones(X.size(0), valid_modal_num, device=X.device) / valid_modal_num)
-
-    #     # ====== 核心修复：手动计算事实融合表征 z_factual (对应论文公式 8) ======
-    #     # 不使用拼接的 1200 维 joint_emb_factual，而是用当前权重加权求和得到 300 维表征
-    #     # ====== 使用 X_detach 计算事实融合表征 z_factual ======
-    #     # 此时，z_factual 的梯度只能顺着 alpha_t 流向注意力生成网络，完美！
-    #     # z_factual = torch.sum(alpha_t.unsqueeze(-1) * X, dim=1)
-    #     z_factual = torch.sum(alpha_t.unsqueeze(-1) * X_detach, dim=1)
-
-    #     # (正向) 时序平稳的反事实表征 z_prev
-    #     alpha_prev_batch = self.alpha_prev[input_idx].detach() 
-    #     z_prev = torch.sum(alpha_prev_batch.unsqueeze(-1) * X_detach, dim=1)
-
-    #     # (负向) 因果盲目的反事实表征 z_uni (均匀融合)
-    #     z_uni = torch.mean(X_detach, dim=1)
-
-    #     # =====================================================================
-    #     # 🌟 核心理论创新：课程感知掩码 (Curriculum-Aware Gating)
-    #     # 诊断样本是否"成熟"：比较历史锚点(z_prev)和盲目锚点(z_uni)
-    #     # 如果它们高度重合(余弦相似度>0.99)，说明该样本刚被模块一放进来，还没学到有效权重
-    #     # =====================================================================
-    #     sim_anchor = F.cosine_similarity(z_prev, z_uni, dim=-1)
-    #     mature_mask = (sim_anchor < 0.99).float() # 1表示成熟可约束，0表示刚引入需自由探索
-
-    #     # 采用余弦距离计算 (Distance = 1 - Cosine Similarity)
-    #     # 注意这里把 joint_emb_factual 换成了 z_factual
-    #     d_pos = 1.0 - F.cosine_similarity(z_factual, z_prev, dim=-1)
-    #     d_neg = 1.0 - F.cosine_similarity(z_factual, z_uni, dim=-1)
-        
-    #     # 计算基于间隔(Margin)的对比损失: max(0, d_pos - d_neg + gamma)
-    #     margin = self.args.csc_gamma
-    #     loss_per_sample = torch.clamp(d_pos - d_neg + margin, min=0.0)
-    #     # 应用成熟度掩码，只对成熟样本计算 CSC Loss
-    #     loss_csc = (loss_per_sample * mature_mask).mean()
-    #     # loss_csc = torch.clamp(d_pos - d_neg + margin, min=0.0).mean()
-
-    #     # 计算时间衰减平滑系数 lambda(t)
-    #     # ======== 修复：CSC 模块的延迟预热 (Warm-up) 机制 ========
-    #     if epoch < 10:
-    #         # 前 10 个 Epoch 绝对不干预！
-    #         # 让模型靠基础 Loss 自由探索，建立起健康的、摆脱了均匀分布的正向历史锚点 (W_avg)
-    #         lambda_t = 0.0  
-    #     else:
-    #         # 10 轮之后，健康的锚点已经成型
-    #         # 此时逐渐加大约束力度，防止模型在后续训练中震荡或灾难性遗忘
-    #         lambda_t = self.args.csc_lambda_0 * ((epoch - 10) / (total_epochs - 10))
-    #     # lambda_t = self.args.csc_lambda_0 * math.exp(-self.args.csc_eta * (epoch / total_epochs))
-
-    #     # 更新历史权重 buffer，供下一个 Epoch 使用 (记得 detach)
-    #     self.alpha_prev[input_idx] = alpha_t.detach()
-
-    #     return lambda_t * loss_csc
 
     def _register_grad_hooks(self, embs_dict):
         """利用 Hook 在反向传播时自动捕获并更新 D_j"""

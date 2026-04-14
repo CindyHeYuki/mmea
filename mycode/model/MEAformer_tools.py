@@ -24,43 +24,73 @@ import pdb
 
 
 
+# class MformerFusion(nn.Module):
+#     def __init__(self, args, modal_num, with_weight=1):
+#         super().__init__()
+#         self.args = args
+#         self.modal_num = modal_num
+#         self.fusion_layer = nn.ModuleList([BertLayer(args) for _ in range(args.num_hidden_layers)])
+#         # self.type_embedding = nn.Embedding(args.inner_view_num, args.hidden_size)
+#         self.type_id = torch.tensor([0, 1, 2, 3, 4, 5]).cuda()
+
+#     def forward(self, embs,causal_bias=None):
+#         # 记录有效模态的索引，保证 causal_bias 和实际传入的模态对齐
+#         valid_indices = [idx for idx in range(len(embs)) if embs[idx] is not None]
+#         embs = [embs[idx] for idx in valid_indices]
+#         # embs = [embs[idx] for idx in range(len(embs)) if embs[idx] is not None]
+#         modal_num = len(embs)
+        
+#         # 过滤掉 None 模态对应的 bias
+#         if causal_bias is not None:
+#             causal_bias = causal_bias[valid_indices]
+        
+
+#         hidden_states = torch.stack(embs, dim=1)
+#         bs = hidden_states.shape[0]
+#         for i, layer_module in enumerate(self.fusion_layer):
+#             # 将 causal_bias 传给每一层
+#             layer_outputs = layer_module(hidden_states, output_attentions=True, causal_bias=causal_bias)
+#             hidden_states = layer_outputs[0]
+            
+#             # layer_outputs = layer_module(hidden_states, output_attentions=True)
+#             # hidden_states = layer_outputs[0]
+#         # torch.Size([30355, 5, 4, 4])
+#         # attention_pro = layer_outputs[1]
+#         # torch.Size([30355, 4, 4])
+#         attention_pro = torch.sum(layer_outputs[1], dim=-3)
+#         attention_pro_comb = torch.sum(attention_pro, dim=-2) / math.sqrt(modal_num * self.args.num_attention_heads)
+#         weight_norm = F.softmax(attention_pro_comb, dim=-1)
+#         embs = [weight_norm[:, idx].unsqueeze(1) * F.normalize(embs[idx]) for idx in range(modal_num)]
+#         joint_emb = torch.cat(embs, dim=1)
+
+#         return joint_emb, hidden_states, weight_norm
+
 class MformerFusion(nn.Module):
     def __init__(self, args, modal_num, with_weight=1):
         super().__init__()
         self.args = args
         self.modal_num = modal_num
         self.fusion_layer = nn.ModuleList([BertLayer(args) for _ in range(args.num_hidden_layers)])
-        # self.type_embedding = nn.Embedding(args.inner_view_num, args.hidden_size)
         self.type_id = torch.tensor([0, 1, 2, 3, 4, 5]).cuda()
 
-    def forward(self, embs,causal_bias=None):
-        # 记录有效模态的索引，保证 causal_bias 和实际传入的模态对齐
-        valid_indices = [idx for idx in range(len(embs)) if embs[idx] is not None]
-        embs = [embs[idx] for idx in valid_indices]
-        # embs = [embs[idx] for idx in range(len(embs)) if embs[idx] is not None]
-        modal_num = len(embs)
-        
-        # 过滤掉 None 模态对应的 bias
-        if causal_bias is not None:
-            causal_bias = causal_bias[valid_indices]
-        
-
+    def forward(self, embs, causal_bias=None, attention_mask=None):
+        # 🚀 核心修复：不再剔除任何模态，保持形状对齐，靠 attention_mask 斩杀噪声！
         hidden_states = torch.stack(embs, dim=1)
-        bs = hidden_states.shape[0]
+        
         for i, layer_module in enumerate(self.fusion_layer):
-            # 将 causal_bias 传给每一层
-            layer_outputs = layer_module(hidden_states, output_attentions=True, causal_bias=causal_bias)
+            layer_outputs = layer_module(hidden_states, attention_mask=attention_mask, output_attentions=True, causal_bias=causal_bias)
             hidden_states = layer_outputs[0]
             
-            # layer_outputs = layer_module(hidden_states, output_attentions=True)
-            # hidden_states = layer_outputs[0]
-        # torch.Size([30355, 5, 4, 4])
-        # attention_pro = layer_outputs[1]
-        # torch.Size([30355, 4, 4])
         attention_pro = torch.sum(layer_outputs[1], dim=-3)
-        attention_pro_comb = torch.sum(attention_pro, dim=-2) / math.sqrt(modal_num * self.args.num_attention_heads)
+        attention_pro_comb = torch.sum(attention_pro, dim=-2) / math.sqrt(self.modal_num * self.args.num_attention_heads)
+        
+        # ====== 将 Mask 注入到最终的融合特征上 ======
+        if attention_mask is not None:
+            attention_pro_comb = attention_pro_comb + attention_mask.squeeze()
+            
         weight_norm = F.softmax(attention_pro_comb, dim=-1)
-        embs = [weight_norm[:, idx].unsqueeze(1) * F.normalize(embs[idx]) for idx in range(modal_num)]
+        
+        embs = [weight_norm[:, idx].unsqueeze(1) * F.normalize(embs[idx]) for idx in range(self.modal_num)]
         joint_emb = torch.cat(embs, dim=1)
 
         return joint_emb, hidden_states, weight_norm
@@ -126,8 +156,8 @@ class MultiModalEncoder(nn.Module):
         #########################
         self.fusion = MformerFusion(args, modal_num=self.args.inner_view_num,
                                     with_weight=self.args.with_weight)
+        
 
-    # 在 MultiModalEncoder.forward 的参数列表最后加上 causal_bias=None
     def forward(self,
                 input_idx,
                 adj,
@@ -138,39 +168,95 @@ class MultiModalEncoder(nn.Module):
                 char_features=None,
                 causal_bias=None):
 
+        # 💡 辅助函数：判断特征是否为“幽灵”纯零噪声
+        def is_active(feat):
+            if feat is None: return False
+            if torch.sum(torch.abs(feat)) < 1e-5: return False
+            return True
+
+        device = input_idx.device
+        ENT_NUM = self.ENT_NUM
+        hidden_size = self.input_dim
+
+        # 动态创建 0 张量占位符，统一形状
+        zero_emb = torch.zeros(ENT_NUM, hidden_size, device=device)
+
         if self.args.w_gcn:
             gph_emb = self.cross_graph_model(self.entity_emb(input_idx), adj)
         else:
-            gph_emb = None
-        if self.args.w_img:
-            img_emb = self.img_fc(img_features)
-        else:
-            img_emb = None
-        if self.args.w_rel:
-            rel_emb = self.rel_fc(rel_features)
-        else:
-            rel_emb = None
-        if self.args.w_attr:
-            att_emb = self.att_fc(att_features)
-        else:
-            att_emb = None
-        if self.args.w_name and name_features is not None:
-            name_emb = self.name_fc(name_features)
-        else:
-            name_emb = None
-        if self.args.w_char and char_features is not None:
-            char_emb = self.char_fc(char_features)
-        else:
-            char_emb = None
-            
-        # 注意这里的模态顺序必须固定，与后续在 MEAformer 中生成的 bias 顺序完全一致
-        emb_list = [img_emb, att_emb, rel_emb, gph_emb, name_emb, char_emb]
-        # 将 emb_list 和 causal_bias 传给 fusion
-        joint_emb, hidden_states, weight_norm = self.fusion(emb_list, causal_bias=causal_bias)
+            gph_emb = zero_emb
 
-        # joint_emb, hidden_states, weight_norm = self.fusion([img_emb, att_emb, rel_emb, gph_emb, name_emb, char_emb])
+        img_emb = self.img_fc(img_features) if (self.args.w_img and is_active(img_features)) else zero_emb
+        rel_emb = self.rel_fc(rel_features) if (self.args.w_rel and is_active(rel_features)) else zero_emb
+        att_emb = self.att_fc(att_features) if (self.args.w_attr and is_active(att_features)) else zero_emb
+        name_emb = self.name_fc(name_features) if (self.args.w_name and is_active(name_features)) else zero_emb
+        char_emb = self.char_fc(char_features) if (self.args.w_char and is_active(char_features)) else zero_emb
+            
+        emb_list = [img_emb, att_emb, rel_emb, gph_emb, name_emb, char_emb]
+        
+        # ====== 🚀 终极杀器：构建 Hard Mask (硬掩码) ======
+        active_list = [
+            (self.args.w_img and is_active(img_features)),
+            (self.args.w_attr and is_active(att_features)),
+            (self.args.w_rel and is_active(rel_features)),
+            self.args.w_gcn,
+            (self.args.w_name and is_active(name_features)),
+            (self.args.w_char and is_active(char_features))
+        ]
+        
+        # 激活的模态是 0.0，未激活（或纯零噪声）给一个极小的负数 -1e9
+        mask_vals = [0.0 if act else -1e9 for act in active_list]
+        attention_mask = torch.tensor(mask_vals, device=device).view(1, 1, 1, -1)
+        # ==================================================
+
+        joint_emb, hidden_states, weight_norm = self.fusion(emb_list, causal_bias=causal_bias, attention_mask=attention_mask)
 
         return gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states, weight_norm
+
+    # # 在 MultiModalEncoder.forward 的参数列表最后加上 causal_bias=None
+    # def forward(self,
+    #             input_idx,
+    #             adj,
+    #             img_features=None,
+    #             rel_features=None,
+    #             att_features=None,
+    #             name_features=None,
+    #             char_features=None,
+    #             causal_bias=None):
+
+    #     if self.args.w_gcn:
+    #         gph_emb = self.cross_graph_model(self.entity_emb(input_idx), adj)
+    #     else:
+    #         gph_emb = None
+    #     if self.args.w_img:
+    #         img_emb = self.img_fc(img_features)
+    #     else:
+    #         img_emb = None
+    #     if self.args.w_rel:
+    #         rel_emb = self.rel_fc(rel_features)
+    #     else:
+    #         rel_emb = None
+    #     if self.args.w_attr:
+    #         att_emb = self.att_fc(att_features)
+    #     else:
+    #         att_emb = None
+    #     if self.args.w_name and name_features is not None:
+    #         name_emb = self.name_fc(name_features)
+    #     else:
+    #         name_emb = None
+    #     if self.args.w_char and char_features is not None:
+    #         char_emb = self.char_fc(char_features)
+    #     else:
+    #         char_emb = None
+            
+    #     # 注意这里的模态顺序必须固定，与后续在 MEAformer 中生成的 bias 顺序完全一致
+    #     emb_list = [img_emb, att_emb, rel_emb, gph_emb, name_emb, char_emb]
+    #     # 将 emb_list 和 causal_bias 传给 fusion
+    #     joint_emb, hidden_states, weight_norm = self.fusion(emb_list, causal_bias=causal_bias)
+
+    #     # joint_emb, hidden_states, weight_norm = self.fusion([img_emb, att_emb, rel_emb, gph_emb, name_emb, char_emb])
+
+    #     return gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states, weight_norm
 
 
 class BertSelfAttention(nn.Module):
@@ -192,47 +278,87 @@ class BertSelfAttention(nn.Module):
         x = x.view(new_x_shape)
         # return x
         return x.permute(0, 2, 1, 3)
-
+    
     def forward(
         self,
         hidden_states: torch.Tensor,
+        attention_mask=None,       # 新增
         output_attentions=False,
-        causal_bias=None,  # 新增因果偏置参数
+        causal_bias=None, 
     ):
         mixed_query_layer = self.query(hidden_states)
-        # [8, 3, 8, 256]
         key_layer = self.transpose_for_scores(self.key(hidden_states))
         value_layer = self.transpose_for_scores(self.value(hidden_states))
-
         query_layer = self.transpose_for_scores(mixed_query_layer)
 
-        # Take the dot product between "query" and "key" to get the raw attention scores.
-        # # [8, 3, 8, 8]
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         
-        # ====== 核心：注入动态因果偏置项 (公式 19) ======
         if causal_bias is not None:
-            # causal_bias 形状为 [modal_num]，通过 view 广播到 [bs, num_heads, modal_num, modal_num]
-            # 加在 key 的维度上，表示分配给对应模态 j 的偏置
             attention_scores = attention_scores + causal_bias.view(1, 1, 1, -1)
-        # ===============================================
+            
+        # ====== 🚀 注入硬掩码，斩杀幽灵模态 ======
+        if attention_mask is not None:
+            attention_scores = attention_scores + attention_mask
+        # =======================================
 
-        # Normalize the attention scores to probabilities.
         attention_probs = nn.functional.softmax(attention_scores, dim=-1)
-
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        # [8, 3, 8, 8]
         attention_probs = self.dropout(attention_probs)
         context_layer = torch.matmul(attention_probs, value_layer)
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        # [8, 8, 768]
         context_layer = context_layer.view(new_context_layer_shape)
 
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
         return outputs
+
+    # def forward(
+    #     self,
+    #     hidden_states: torch.Tensor,
+    #     attention_mask=None,       # 新增
+    #     output_attentions=False,
+    #     causal_bias=None,  # 新增因果偏置参数
+    # ):
+    #     mixed_query_layer = self.query(hidden_states)
+    #     # [8, 3, 8, 256]
+    #     key_layer = self.transpose_for_scores(self.key(hidden_states))
+    #     value_layer = self.transpose_for_scores(self.value(hidden_states))
+
+    #     query_layer = self.transpose_for_scores(mixed_query_layer)
+
+    #     # Take the dot product between "query" and "key" to get the raw attention scores.
+    #     # # [8, 3, 8, 8]
+    #     attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+    #     attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        
+    #     # ====== 核心：注入动态因果偏置项 (公式 19) ======
+    #     if causal_bias is not None:
+    #         # causal_bias 形状为 [modal_num]，通过 view 广播到 [bs, num_heads, modal_num, modal_num]
+    #         # 加在 key 的维度上，表示分配给对应模态 j 的偏置
+    #         attention_scores = attention_scores + causal_bias.view(1, 1, 1, -1)
+    #     # ===============================================
+
+        
+    #     # ====== 🚀 注入硬掩码，斩杀幽灵模态 ======
+    #     if attention_mask is not None:
+    #         attention_scores = attention_scores + attention_mask
+    #     # =======================================
+
+    #     # Normalize the attention scores to probabilities.
+    #     attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+
+    #     # This is actually dropping out entire tokens to attend to, which might
+    #     # seem a bit unusual, but is taken from the original Transformer paper.
+    #     # [8, 3, 8, 8]
+    #     attention_probs = self.dropout(attention_probs)
+    #     context_layer = torch.matmul(attention_probs, value_layer)
+    #     context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+    #     new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+    #     # [8, 8, 768]
+    #     context_layer = context_layer.view(new_context_layer_shape)
+
+    #     outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
+    #     return outputs
 
 
 class BertSelfOutput(nn.Module):
@@ -258,20 +384,38 @@ class BertAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        attention_mask=None,       # 新增
         output_attentions=False,
         causal_bias=None
     ):
         self_outputs = self.self(
             hidden_states,
-            output_attentions,
+            attention_mask=attention_mask, # 传入
+            output_attentions=output_attentions,
             causal_bias=causal_bias,
         )
 
         attention_output = self.output(self_outputs[0], hidden_states)
-        outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
-        # attention: torch.Size([30355, 5, 4, 4])
-        # 5: head
+        outputs = (attention_output,) + self_outputs[1:]
         return outputs
+
+    # def forward(
+    #     self,
+    #     hidden_states: torch.Tensor,
+    #     output_attentions=False,
+    #     causal_bias=None
+    # ):
+    #     self_outputs = self.self(
+    #         hidden_states,
+    #         output_attentions,
+    #         causal_bias=causal_bias,
+    #     )
+
+    #     attention_output = self.output(self_outputs[0], hidden_states)
+    #     outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
+    #     # attention: torch.Size([30355, 5, 4, 4])
+    #     # 5: head
+    #     return outputs
 
 
 class BertIntermediate(nn.Module):
@@ -311,9 +455,10 @@ class BertLayer(nn.Module):
             self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
 
-    def forward(self, hidden_states: torch.Tensor, output_attentions=False,causal_bias=None):
+    def forward(self, hidden_states: torch.Tensor, attention_mask=None, output_attentions=False, causal_bias=None):
         self_attention_outputs = self.attention(
             hidden_states,
+            attention_mask=attention_mask, # 传入
             output_attentions=output_attentions,
             causal_bias=causal_bias,
         )
@@ -321,17 +466,34 @@ class BertLayer(nn.Module):
             return (self_attention_outputs[0], self_attention_outputs[1])
 
         attention_output = self_attention_outputs[0]
-        # if decoder, the last output is tuple of self-attn cache
         outputs = self_attention_outputs[1]
-        # present_key_value = self_attention_outputs[-1]
-        # torch.Size([30355, 4, 300])
         layer_output = apply_chunking_to_forward(
             self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
         )
         outputs = (layer_output, outputs)
-        # if decoder, return the attn key/values as the last output
-        # outputs = outputs + (present_key_value,)
         return outputs
+
+    # def forward(self, hidden_states: torch.Tensor, output_attentions=False,causal_bias=None):
+    #     self_attention_outputs = self.attention(
+    #         hidden_states,
+    #         output_attentions=output_attentions,
+    #         causal_bias=causal_bias,
+    #     )
+    #     if not self.config.use_intermediate:
+    #         return (self_attention_outputs[0], self_attention_outputs[1])
+
+    #     attention_output = self_attention_outputs[0]
+    #     # if decoder, the last output is tuple of self-attn cache
+    #     outputs = self_attention_outputs[1]
+    #     # present_key_value = self_attention_outputs[-1]
+    #     # torch.Size([30355, 4, 300])
+    #     layer_output = apply_chunking_to_forward(
+    #         self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
+    #     )
+    #     outputs = (layer_output, outputs)
+    #     # if decoder, return the attn key/values as the last output
+    #     # outputs = outputs + (present_key_value,)
+    #     return outputs
 
     def feed_forward_chunk(self, attention_output):
         intermediate_output = self.intermediate(attention_output)

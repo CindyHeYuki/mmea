@@ -16,7 +16,23 @@ from tqdm import tqdm
 
 from .utils import get_topk_indices, get_adjr
 from transformers import AutoTokenizer  # 新增导入
+import re
 
+# ====== 新增：URI 清洗函数 ======
+def clean_uri_to_text(uri):
+    """将 <http://dbpedia.org/ontology/birthDate> 转化为 'birth date'"""
+    if uri is None or len(uri) == 0:
+        return "none"
+    # 截取最后的路径
+    text = uri.strip().split('/')[-1].split('#')[-1].strip('>')
+    # 处理 Freebase 多级路径
+    text = text.replace('.', ' ')
+    # 处理下划线和连字符
+    text = text.replace('_', ' ').replace('-', ' ')
+    # 处理驼峰命名 (如 birthDate -> birth Date)
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    return text.lower().strip()
+# ===============================
 
 #New1
 # 添加在文件开头的import之后
@@ -140,6 +156,8 @@ def load_eva_data(logger, args):
             elif args.data_choice == "FBDB15K":
                 # 指向你刚刚生成的文件
                 name_path = os.path.join(args.data_path, "FBDB15K", "ent_name.json") 
+            elif args.data_choice == "FBYG15K":
+                name_path = os.path.join(args.data_path, "FBYG15K", "ent_name.json")
             else:
                 name_path = ""
                 
@@ -190,12 +208,49 @@ def load_eva_data(logger, args):
     logger.info(f"#left entity : {len(left_ents)}, #right entity: {len(right_ents)}")
     logger.info(f"#left entity not in train set: {len(left_non_train)}, #right entity not in train set: {len(right_non_train)}")
 
-    rel_features = load_relation(ENT_NUM, triples, 1000)
+    # rel_features = load_relation(ENT_NUM, triples, 1000)
+    # logger.info(f"relation feature shape:{rel_features.shape}")
+    # a1 = os.path.join(file_dir, 'training_attrs_1')
+    # a2 = os.path.join(file_dir, 'training_attrs_2')
+    # att_features = load_attr([a1, a2], ENT_NUM, ent2id_dict, 1000)  # attr
+    # logger.info(f"attribute feature shape:{att_features.shape}")
+
+    # ====== ⚠️ 关键修改：接收映射表并提取文本 ======
+    rel_features, rel_index_dict = load_relation(ENT_NUM, triples, 1000)
     logger.info(f"relation feature shape:{rel_features.shape}")
+    
     a1 = os.path.join(file_dir, 'training_attrs_1')
     a2 = os.path.join(file_dir, 'training_attrs_2')
-    att_features = load_attr([a1, a2], ENT_NUM, ent2id_dict, 1000)  # attr
+    att_features, attr2id = load_attr([a1, a2], ENT_NUM, ent2id_dict, 1000)
     logger.info(f"attribute feature shape:{att_features.shape}")
+
+    
+    # 💡 关键修复：动态获取真实的特征维度，拒绝硬编码！
+    rel_texts = ["none"] * rel_features.shape[1]
+    attr_texts = ["none"] * att_features.shape[1]
+
+    if hasattr(args, 'use_plm') and args.use_plm == 1:
+        # 1. 提取关系文本：先读取 rel_ids 字典，再根据模型的 rel_index_dict 对应写入
+        rel_id2str = {}
+        for fn in ['rel_ids_1', 'rel_ids_2']:
+            path = os.path.join(file_dir, fn)
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        th = line.strip().split('\t')
+                        if len(th) >= 2:
+                            rel_id2str[int(th[0])] = th[1]
+        
+        for r_id, new_idx in rel_index_dict.items():
+            if r_id in rel_id2str:
+                rel_texts[new_idx] = clean_uri_to_text(rel_id2str[r_id])
+
+        # 2. 提取属性文本：直接清洗 attr2id 的键 (因为键就是属性的 URI 字符串)
+        for attr_str, new_idx in attr2id.items():
+            attr_texts[new_idx] = clean_uri_to_text(attr_str)
+    # ===============================================
+
+    
 
     #New1
     # 计算实体度数（用于结构稀疏度）
@@ -279,7 +334,9 @@ def load_eva_data(logger, args):
         'input_idx': input_idx,
         'adj': adj,
         'plm_input_ids': plm_input_ids,            # 新增返回
-        'plm_attention_mask': plm_attention_mask   # 新增返回
+        'plm_attention_mask': plm_attention_mask,   # 新增返回
+        'rel_texts': rel_texts,                    # ⚠️ 新增返回：关系文本列表
+        'attr_texts': attr_texts                   # ⚠️ 新增返回：属性文本列表
     }, {"left": left_non_train, "right": right_non_train}, train_ill, test_ill, eval_ill, test_ill_
 
 
@@ -526,6 +583,37 @@ def get_ent2id(fns):
 
 
 # The most frequent attributes are selected to save space
+# def load_attr(fns, e, ent2id, topA=1000):
+#     cnt = {}
+#     for fn in fns:
+#         with open(fn, 'r', encoding='utf-8') as f:
+#             for line in f:
+#                 th = line[:-1].split('\t')
+#                 if th[0] not in ent2id:
+#                     continue
+#                 for i in range(1, len(th)):
+#                     if th[i] not in cnt:
+#                         cnt[th[i]] = 1
+#                     else:
+#                         cnt[th[i]] += 1
+#     fre = [(k, cnt[k]) for k in sorted(cnt, key=cnt.get, reverse=True)]
+#     attr2id = {}
+#     # pdb.set_trace()
+#     topA = min(1000, len(fre))
+#     for i in range(topA):
+#         attr2id[fre[i][0]] = i
+#     attr = np.zeros((e, topA), dtype=np.float32)
+#     for fn in fns:
+#         with open(fn, 'r', encoding='utf-8') as f:
+#             for line in f:
+#                 th = line[:-1].split('\t')
+#                 if th[0] in ent2id:
+#                     for i in range(1, len(th)):
+#                         if th[i] in attr2id:
+#                             attr[ent2id[th[0]]][attr2id[th[i]]] = 1.0
+#     return attr
+
+# The most frequent attributes are selected to save space
 def load_attr(fns, e, ent2id, topA=1000):
     cnt = {}
     for fn in fns:
@@ -554,7 +642,25 @@ def load_attr(fns, e, ent2id, topA=1000):
                     for i in range(1, len(th)):
                         if th[i] in attr2id:
                             attr[ent2id[th[0]]][attr2id[th[i]]] = 1.0
-    return attr
+                            
+    # ⚠️ 关键修改：同时返回特征矩阵和动态生成的 ID 映射表
+    return attr, attr2id
+
+
+# def load_relation(e, KG, topR=1000):
+#     # (39654, 1000)
+#     rel_mat = np.zeros((e, topR), dtype=np.float32)
+#     rels = np.array(KG)[:, 1]
+#     top_rels = Counter(rels).most_common(topR)
+#     rel_index_dict = {r: i for i, (r, cnt) in enumerate(top_rels)}
+#     for tri in KG:
+#         h = tri[0]
+#         r = tri[1]
+#         o = tri[2]
+#         if r in rel_index_dict:
+#             rel_mat[h][rel_index_dict[r]] += 1.
+#             rel_mat[o][rel_index_dict[r]] += 1.
+#     return np.array(rel_mat)
 
 
 def load_relation(e, KG, topR=1000):
@@ -570,7 +676,9 @@ def load_relation(e, KG, topR=1000):
         if r in rel_index_dict:
             rel_mat[h][rel_index_dict[r]] += 1.
             rel_mat[o][rel_index_dict[r]] += 1.
-    return np.array(rel_mat)
+            
+    # ⚠️ 关键修改：同时返回特征矩阵和动态生成的 ID 映射表
+    return np.array(rel_mat), rel_index_dict
 
 
 def load_json_embd(path):

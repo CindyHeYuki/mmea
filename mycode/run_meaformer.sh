@@ -38,7 +38,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --structure_encoder "gat" \
             --num_attention_heads 1 \
             --num_hidden_layers 1 \
-            --use_surface   1     \
+            --use_surface   $5     \
             --use_intermediate 1   \
             --replay 0 \
             --use_sample_schedule 1 \
@@ -49,9 +49,13 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --use_csc 1 \
             --csc_lambda_0 5 \
             --csc_gamma 0.5 \
-            --use_plm 1 \
+            --use_plm $6 \
             --plm_name '/data0/hwx/mmea_copy/models/bert-base-multilingual-cased' \
             --freeze_plm 1 \
+            --plm_max_len 16 \
+            --plm_embed_name $7 \
+            --plm_embed_rel $8 \
+            --plm_embed_attr $9 \
 
             #--enable_sota \
             
