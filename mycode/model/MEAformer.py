@@ -141,27 +141,28 @@ class MEAformer(nn.Module):
         
         # C_j: 固有因果置信度，初始化为一个中等偏上的先验值 (如 0.5)
         self.causal_Cj = {m: 0.5 for m in self.modal_names}
-        # ====================================
-        # ================= 🚀 新增：离线实体级 PLM 属性模块 (可插拔) =================
+
+        # ================= 🚀 终极版：早融合 PLM 模块 =================
         self.plm_ent_attr = getattr(self.args, "plm_ent_attr", 0)
         if self.plm_ent_attr == 1:
-            plm_hidden_dim = getattr(self.args, "plm_hidden_dim", 768)
-            target_dim = self.args.hidden_size 
-            self.plm_ent_adapter = nn.Sequential(
-                nn.Linear(plm_hidden_dim, target_dim),
+            plm_dim = getattr(self.args, "plm_hidden_dim", 768)
+            # 核心改变：直接映射到你最原始的属性维度 (通常是 1000)
+            target_dim = self.att_features.shape[1] 
+            
+            self.plm_early_adapter = nn.Sequential(
+                nn.Linear(plm_dim, target_dim),
                 nn.GELU(),
-                nn.LayerNorm(target_dim) 
+                nn.LayerNorm(target_dim)
             )
-            self.plm_ent_fusion_norm = nn.LayerNorm(target_dim)
-            print(f"✅ MEAformer: Pluggable Entity PLM-Attr module initialized")
-
+            # 👇 极其重要的安全锁，必须保留！
+            self.plm_gate = nn.Parameter(torch.tensor(0.01))
+            print(f"✅ Early Fusion PLM Module Activated! ({plm_dim} -> {target_dim})")
+            
         self.plm_features = None 
-        # 在 __init__ 离线特征初始化的最底下加上这行：
-        # 定义一个极小的初始权重，让网络自己决定吸收多少 PLM 的信息
-        self.plm_gate = nn.Parameter(torch.tensor(0.01))
         # =============================================================================
-        
 
+
+        
     def _extract_plm_features(self):
         """
         专用名称特征提取：
@@ -192,44 +193,46 @@ class MEAformer(nn.Module):
 
     def forward(self, input_batch, epoch=0, total_epochs=1):
         # 生成所有实体和隐藏层嵌入 (必须在最前面，为了后面统一获取 Device)
-        gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states, weight_norm = self.joint_emb_generat(only_joint=False, epoch=epoch, total_epochs=total_epochs)
-        # gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states = self.joint_emb_generat(only_joint=False, epoch=epoch, total_epochs=total_epochs)
-        gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, joint_emb_hid = self.generate_hidden_emb(hidden_states)
+        # gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states, weight_norm = self.joint_emb_generat(only_joint=False, epoch=epoch, total_epochs=total_epochs)
+        # # gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states = self.joint_emb_generat(only_joint=False, epoch=epoch, total_epochs=total_epochs)
+        # gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, joint_emb_hid = self.generate_hidden_emb(hidden_states)
 
-        # 动态获取所在设备，避免硬编码 .cuda() 或未定义的 self.device
-        device = joint_emb.device 
+        # # 动态获取所在设备，避免硬编码 .cuda() 或未定义的 self.device
+        # device = joint_emb.device 
 
-        # ================= 🚀 修改：安全的 PLM 残差融合 =================
-        if getattr(self, "plm_ent_attr", 0) == 1 and self.plm_features is not None:
-            plm_feat = self.plm_features.to(device)
-            adapted_attr = self.plm_ent_adapter(plm_feat)
-            
-            # 使用可学习的门控权重进行融合，彻底避免特征覆盖！
-            joint_emb = joint_emb + self.plm_gate * adapted_attr
-            joint_emb = self.plm_ent_fusion_norm(joint_emb)
-            
-            joint_emb_hid = joint_emb_hid + self.plm_gate * adapted_attr
-            joint_emb_hid = self.plm_ent_fusion_norm(joint_emb_hid)
-        # =====================================================================
-
-        # # ================= 🚀 新增：离线实体属性特征残差融合 =================
-        # # 此时 joint_emb 包含了所有实体的多模态特征，维度为 [ent_num, hidden_size]
+        # # ================= 🚀 修改：安全的 PLM 残差融合 =================
         # if getattr(self, "plm_ent_attr", 0) == 1 and self.plm_features is not None:
-        #     # 1. 确保离线特征在当前显卡上
         #     plm_feat = self.plm_features.to(device)
-            
-        #     # 2. 降维并映射到图结构所在的语义空间
         #     adapted_attr = self.plm_ent_adapter(plm_feat)
             
-        #     # 3. 对全量实体的 joint_emb 进行残差注入并归一化
-        #     # 这一步直接提升了最终输出特征的质量，对 test() 的 Hits@k 指标有决定性帮助！
-        #     joint_emb = joint_emb + adapted_attr
+        #     # 使用可学习的门控权重进行融合，彻底避免特征覆盖！
+        #     joint_emb = joint_emb + self.plm_gate * adapted_attr
         #     joint_emb = self.plm_ent_fusion_norm(joint_emb)
             
-        #     # 4. 同样注入到 hidden joint_emb，保持两个 View 对齐时的语义一致性
-        #     joint_emb_hid = joint_emb_hid + adapted_attr
+        #     joint_emb_hid = joint_emb_hid + self.plm_gate * adapted_attr
         #     joint_emb_hid = self.plm_ent_fusion_norm(joint_emb_hid)
         # # =====================================================================
+        device = self.input_idx.device # 安全获取设备
+        
+        # ================= 🚀 核心创新：前置语义拦截注入 =================
+        # 我们在 GCN 和注意力机制运转【之前】，把 PLM 的丰富语义悄悄注入到属性特征中！
+        original_att = self.att_features
+        if getattr(self, "plm_ent_attr", 0) == 1 and self.plm_features is not None:
+            plm_feat = self.plm_features.to(device)
+            adapted_plm = self.plm_early_adapter(plm_feat)
+            
+            # 动态覆盖原始属性特征（这样网络内部的 Attention 就能看到高级语义了！）
+            self.att_features = original_att + self.plm_gate * adapted_plm
+        # =====================================================================
+
+        # 生成所有实体和隐藏层嵌入 (此时里面的 Attention 会自然给 att 分配高权重！)
+        gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states, weight_norm = self.joint_emb_generat(only_joint=False, epoch=epoch, total_epochs=total_epochs)
+        gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, joint_emb_hid = self.generate_hidden_emb(hidden_states)
+
+        # ====== 极其重要：恢复原始特征，防止内存泄漏和计算图崩溃 ======
+        self.att_features = original_att
+        # =====================================================================
+
 
         # ====== 新增：初始化软权重 ======
         sample_weights = None 
@@ -570,51 +573,88 @@ class MEAformer(nn.Module):
 
     def compute_csc_loss(self, input_idx, embs_list, weight_norm, epoch, total_epochs):
         """
-        因果约束 v3.0: 反事实不变性 (Counterfactual Invariance)
-        通过屏蔽主导模态，强迫弱势模态学习真实因果特征，防止捷径学习。
+        因果独立机制约束 (Independent Causal Mechanisms, ICM)
+        论文叙事：真实的因果机制应当是相互独立的。为了防止晚期训练中所有模态坍塌
+        成同一种捷径特征 (Shortcut)，我们强制各模态的表征空间保持正交独立。
         """
         valid_embs = [e for e in embs_list if e is not None]
-
-        # 随机采样，保证梯度稳定
         N = weight_norm.shape[0]
         sample_size = min(N, 2048) 
         rand_idx = torch.randperm(N, device=weight_norm.device)[:sample_size]
 
-        curr_weights = weight_norm[rand_idx] # [B, M]
-        B, M = curr_weights.shape
-        stacked_embs = torch.stack([e[rand_idx] for e in valid_embs], dim=1) # [B, M, dim]
+        # 获取各模态特征: [B, M, dim]
+        stacked_embs = torch.stack([e[rand_idx] for e in valid_embs], dim=1) 
+        B, M, D = stacked_embs.shape
 
-        # 1. 原始的联合表征 (带有潜在的捷径依赖)
-        joint_emb = torch.sum(curr_weights.unsqueeze(2) * stacked_embs, dim=1)
-
-        # 2. 找到模型当前最依赖的“主导模态” (例如经常是 img)
-        _, dominant_idx = torch.max(curr_weights, dim=1)
-
-        # 3. 构造反事实权重：屏蔽掉这个主导模态！
-        mask = torch.ones_like(curr_weights)
-        batch_idx = torch.arange(B, device=curr_weights.device)
-        mask[batch_idx, dominant_idx] = 0.0 # 把最大的权重归零
+        # 对特征进行 L2 归一化，以便计算余弦相似度
+        stacked_embs = F.normalize(stacked_embs, p=2, dim=-1)
         
-        cf_weights = curr_weights * mask
-        # 重新归一化剩余的权重，让其他模态平摊注意力
-        cf_weights = cf_weights / (cf_weights.sum(dim=1, keepdim=True) + 1e-8)
+        # 计算同一个实体内部，不同模态之间的相关性矩阵 [B, M, M]
+        sim_matrix = torch.bmm(stacked_embs, stacked_embs.transpose(1, 2))
+        
+        # 构造目标矩阵：单位阵 [B, M, M] (对角线为1，非对角线为0)
+        # 意义：自身与自身高度相关(1)，不同模态之间尽量正交无冗余(0)
+        I = torch.eye(M, device=sim_matrix.device).unsqueeze(0).expand(B, M, M)
+        
+        # 核心约束：ICM 冗余最小化 (极其安全，绝对不会撕裂跨图谱的对齐空间)
+        loss_icm = F.mse_loss(sim_matrix, I)
 
-        # 4. 计算反事实表征 (没有主导模态参与的表征)
-        cf_joint = torch.sum(cf_weights.unsqueeze(2) * stacked_embs, dim=1)
-
-        # 5. 反事实一致性损失 (Counterfactual Consistency)
-        # 强迫模型：即使我剥夺了你最爱看的模态，你依然要给我生成一样的核心语义！
-        # 采用 MSE 损失拉近两者的距离，极其安全，不会破坏图空间
-        loss_csc = F.mse_loss(joint_emb, cf_joint)
-
-        # 动态退火：前期让模型自由学习，后期(epoch>30)加大干预力度，防止坍塌
         progress = epoch / max(1, total_epochs)
+        # 同样使用正弦曲线，前期自由对齐，后期加强约束防止坍塌
         lambda_t = math.sin((math.pi / 2.0) * progress) 
         
-        # 将缩放因子调到合理的水平 (控制在总 Loss 的 10% 左右)
-        scale_factor = 10.0 
+        # 将缩放因子调到一个温和的级别
+        scale_factor = 5.0 
 
-        return scale_factor * lambda_t * loss_csc
+        return scale_factor * lambda_t * loss_icm
+
+    # def compute_csc_loss(self, input_idx, embs_list, weight_norm, epoch, total_epochs):
+    #     """
+    #     因果约束 v3.0: 反事实不变性 (Counterfactual Invariance)
+    #     通过屏蔽主导模态，强迫弱势模态学习真实因果特征，防止捷径学习。
+    #     """
+    #     valid_embs = [e for e in embs_list if e is not None]
+
+    #     # 随机采样，保证梯度稳定
+    #     N = weight_norm.shape[0]
+    #     sample_size = min(N, 2048) 
+    #     rand_idx = torch.randperm(N, device=weight_norm.device)[:sample_size]
+
+    #     curr_weights = weight_norm[rand_idx] # [B, M]
+    #     B, M = curr_weights.shape
+    #     stacked_embs = torch.stack([e[rand_idx] for e in valid_embs], dim=1) # [B, M, dim]
+
+    #     # 1. 原始的联合表征 (带有潜在的捷径依赖)
+    #     joint_emb = torch.sum(curr_weights.unsqueeze(2) * stacked_embs, dim=1)
+
+    #     # 2. 找到模型当前最依赖的“主导模态” (例如经常是 img)
+    #     _, dominant_idx = torch.max(curr_weights, dim=1)
+
+    #     # 3. 构造反事实权重：屏蔽掉这个主导模态！
+    #     mask = torch.ones_like(curr_weights)
+    #     batch_idx = torch.arange(B, device=curr_weights.device)
+    #     mask[batch_idx, dominant_idx] = 0.0 # 把最大的权重归零
+        
+    #     cf_weights = curr_weights * mask
+    #     # 重新归一化剩余的权重，让其他模态平摊注意力
+    #     cf_weights = cf_weights / (cf_weights.sum(dim=1, keepdim=True) + 1e-8)
+
+    #     # 4. 计算反事实表征 (没有主导模态参与的表征)
+    #     cf_joint = torch.sum(cf_weights.unsqueeze(2) * stacked_embs, dim=1)
+
+    #     # 5. 反事实一致性损失 (Counterfactual Consistency)
+    #     # 强迫模型：即使我剥夺了你最爱看的模态，你依然要给我生成一样的核心语义！
+    #     # 采用 MSE 损失拉近两者的距离，极其安全，不会破坏图空间
+    #     loss_csc = F.mse_loss(joint_emb, cf_joint)
+
+    #     # 动态退火：前期让模型自由学习，后期(epoch>30)加大干预力度，防止坍塌
+    #     progress = epoch / max(1, total_epochs)
+    #     lambda_t = math.sin((math.pi / 2.0) * progress) 
+        
+    #     # 将缩放因子调到合理的水平 (控制在总 Loss 的 10% 左右)
+    #     scale_factor = 10.0 
+
+    #     return scale_factor * lambda_t * loss_csc
 
     
 

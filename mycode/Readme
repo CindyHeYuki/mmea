@@ -46,7 +46,20 @@ bash run_meaformer.sh 3 FBDB15K norm 0.2 1 0 0 1 > test001.out 2>&1 &
 开PLM name0 rel0 attr1
 bash run_meaformer.sh 3 FBDB15K norm 0.2 1 0 0 1 > test001.out 2>&1 &
 
+
+bash run_meaformer.sh 1 FBYG15K norm 0.2 1 1 1 1 > FBYG15K_test111.out 2>&1 &
+bash run_meaformer.sh 1 FBYG15K norm 0.2 1 0 0 1 > test001.out 2>&1 &
+
+nohup bash run_meaformer.sh 3 FBDB15K norm 0.2 1 1 0 1 0 > test010.log 2>&1 &
+
+
+bash run_meaformer.sh 0 FBDB15K norm 0.2 0 0 0 0 0 > test000.log 2>&1 &
+
+bash run_meaformer.sh 0 FBDB15K norm 0.2 0 1 0 0 1 > test001.log 2>&1 &
+
 ===================
+
+
 迭代学习组
 bash run_meaformer_il.sh 1 FBDB15K norm 0.2 0 > test.out 2>&1 &
 

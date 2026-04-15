@@ -1,3 +1,8 @@
 *.log
 *.out
 *.pyc
+# 忽略所有 .sh 文件
+*.sh
+
+# 但不忽略 run_meaformer.sh
+!run_meaformer.sh
