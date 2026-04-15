@@ -43,6 +43,16 @@ class Runner:
         self.model_list = []
         set_seed(args.random_seed)
         self.data_init()
+        # ====== 新增：提取 PLM 特征并转为 GPU Tensor ======
+        self.plm_features = None
+        # data_init 通常会把数据字典存为 self.data
+        if hasattr(self, 'data') and self.data.get('plm_features') is not None:
+            import torch # 确保顶部导入了 torch
+            self.plm_features = torch.tensor(self.data['plm_features'], dtype=torch.float32).cuda()
+            if self.logger:
+                self.logger.info("✅ PLM Features converted to Tensor and moved to CUDA.")
+        # ===============================================
+
         self.model_choise()
         set_seed(args.random_seed)
 
@@ -83,6 +93,9 @@ class Runner:
         assert self.args.model_name in ["EVA", "MCLEA", "MSNEA", "MEAformer"]
         if self.args.model_name == "MEAformer":
             self.model = MEAformer(self.KGs, self.args)
+            # ====== 新增：将离线特征绑定到模型内部 ======
+            self.model.plm_features = self.plm_features
+            # ===========================================
 
         self.model = self._load_model(self.model, model_name=self.args.model_name_save)
 

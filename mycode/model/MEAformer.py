@@ -61,41 +61,42 @@ class MEAformer(nn.Module):
                 print("Extracting offline PLM features for names...")
                 self.static_plm_features = self._extract_plm_features().detach().cuda()
                 
-            # ====== 🚀 新增：关系和属性的 PLM 语义提取 ======
-            if getattr(self.args, "plm_embed_rel", 0) == 1 and "rel_texts" in kgs:
-                print("Extracting PLM features for Relations...")
-                # 提取关系文本向量 (1000 x 768)
-                self.rel_text_embs = self._extract_plm_features(kgs["rel_texts"]).detach().cuda()
-                self.rel_plm_proj = nn.Sequential(
-                    nn.Linear(self.args.plm_hidden_dim, self.args.hidden_size),
-                    nn.LayerNorm(self.args.hidden_size)
-                ).cuda()
-                self.raw_rel_features = self.rel_features # 备份实体的稀疏矩阵 [ent_num, 1000]
+            # # ====== 🚀 新增：关系和属性的 PLM 语义提取 ======
+            # if getattr(self.args, "plm_embed_rel", 0) == 1 and "rel_texts" in kgs:
+            #     print("Extracting PLM features for Relations...")
+            #     # 提取关系文本向量 (1000 x 768)
+            #     self.rel_text_embs = self._extract_plm_features(kgs["rel_texts"]).detach().cuda()
+            #     self.rel_plm_proj = nn.Sequential(
+            #         nn.Linear(self.args.plm_hidden_dim, self.args.hidden_size),
+            #         nn.LayerNorm(self.args.hidden_size)
+            #     ).cuda()
+            #     self.raw_rel_features = self.rel_features # 备份实体的稀疏矩阵 [ent_num, 1000]
 
-                # ====== 🔥 核心修复：关系专属残差偏移参数 ======
-                self.rel_id_shift = nn.Parameter(torch.zeros(self.raw_rel_features.shape[1], self.args.hidden_size)).cuda()
-                nn.init.xavier_normal_(self.rel_id_shift)
+            #     # ====== 🔥 核心修复：关系专属残差偏移参数 ======
+            #     self.rel_id_shift = nn.Parameter(torch.zeros(self.raw_rel_features.shape[1], self.args.hidden_size)).cuda()
+            #     nn.init.xavier_normal_(self.rel_id_shift)
 
-            if getattr(self.args, "plm_embed_attr", 0) == 1 and "attr_texts" in kgs:
-                print("Extracting PLM features for Attributes...")
-                # 提取属性文本向量 (1000 x 768)
-                self.att_text_embs = self._extract_plm_features(kgs["attr_texts"]).detach().cuda()
-                self.att_plm_proj = nn.Sequential(
-                    nn.Linear(self.args.plm_hidden_dim, self.args.hidden_size),
-                    nn.LayerNorm(self.args.hidden_size)
-                ).cuda()
-                self.raw_att_features = self.att_features # 备份实体的稀疏矩阵 [ent_num, 1000]
+            # if getattr(self.args, "plm_embed_attr", 0) == 1 and "attr_texts" in kgs:
+            #     print("Extracting PLM features for Attributes...")
+            #     # 提取属性文本向量 (1000 x 768)
+            #     self.att_text_embs = self._extract_plm_features(kgs["attr_texts"]).detach().cuda()
+            #     self.att_plm_proj = nn.Sequential(
+            #         nn.Linear(self.args.plm_hidden_dim, self.args.hidden_size),
+            #         nn.LayerNorm(self.args.hidden_size)
+            #     ).cuda()
+            #     self.raw_att_features = self.att_features # 备份实体的稀疏矩阵 [ent_num, 1000]
 
-                # ====== 🔥 核心修复：属性专属残差偏移参数 ======
-                self.att_id_shift = nn.Parameter(torch.zeros(self.raw_att_features.shape[1], self.args.hidden_size)).cuda()
-                nn.init.xavier_normal_(self.att_id_shift)
-            # ===============================================
+            #     # ====== 🔥 核心修复：属性专属残差偏移参数 ======
+            #     self.att_id_shift = nn.Parameter(torch.zeros(self.raw_att_features.shape[1], self.args.hidden_size)).cuda()
+            #     nn.init.xavier_normal_(self.att_id_shift)
+            # # ===============================================
 
         img_dim = self._get_img_dim(kgs)
         char_dim = kgs["char_features"].shape[1] if self.char_features is not None else 100
 
-        # ⚠️ 修改：动态计算属性特征输入维度 (如果开启 PLM 属性，则为 300 维)
-        attr_input_dim = self.args.hidden_size if (getattr(self.args, "use_plm", 0) == 1 and getattr(self.args, "plm_embed_attr", 0) == 1) else kgs["att_features"].shape[1]
+        # # ⚠️ 修改：动态计算属性特征输入维度 (如果开启 PLM 属性，则为 300 维)
+        # attr_input_dim = self.args.hidden_size if (getattr(self.args, "use_plm", 0) == 1 and getattr(self.args, "plm_embed_attr", 0) == 1) else kgs["att_features"].shape[1]
+        attr_input_dim = kgs["att_features"].shape[1]
 
         self.multimodal_encoder = MultiModalEncoder(args=self.args,
                                                     ent_num=kgs["ent_num"],
@@ -104,19 +105,19 @@ class MEAformer(nn.Module):
                                                     use_project_head=self.args.use_project_head,
                                                     attr_input_dim=attr_input_dim) 
 
-        # ====== 🚀 终极维度对齐补丁 ======
-        # 因为我们已经用 PLM 把关系和属性特征降维且语义化到了 300 维，
-        # 所以必须把 Encoder 底层原本写死的 1000 维接收器替换掉！
-        if getattr(self.args, "use_plm", 0) == 1:
-            if getattr(self.args, "plm_embed_rel", 0) == 1:
-                # 强行覆盖底层关系投影层：300 -> 300
-                self.multimodal_encoder.rel_fc = nn.Linear(self.args.hidden_size, self.args.hidden_size).cuda()
+        # # ====== 🚀 终极维度对齐补丁 ======
+        # # 因为我们已经用 PLM 把关系和属性特征降维且语义化到了 300 维，
+        # # 所以必须把 Encoder 底层原本写死的 1000 维接收器替换掉！
+        # if getattr(self.args, "use_plm", 0) == 1:
+        #     if getattr(self.args, "plm_embed_rel", 0) == 1:
+        #         # 强行覆盖底层关系投影层：300 -> 300
+        #         self.multimodal_encoder.rel_fc = nn.Linear(self.args.hidden_size, self.args.hidden_size).cuda()
                 
-            if getattr(self.args, "plm_embed_attr", 0) == 1:
-                # 强行覆盖底层属性投影层：300 -> 300 (双保险)
-                if hasattr(self.multimodal_encoder, 'att_fc'):
-                    self.multimodal_encoder.att_fc = nn.Linear(self.args.hidden_size, self.args.hidden_size).cuda()
-        # ==================================
+        #     if getattr(self.args, "plm_embed_attr", 0) == 1:
+        #         # 强行覆盖底层属性投影层：300 -> 300 (双保险)
+        #         if hasattr(self.multimodal_encoder, 'att_fc'):
+        #             self.multimodal_encoder.att_fc = nn.Linear(self.args.hidden_size, self.args.hidden_size).cuda()
+        # # ==================================
 
         self.multi_loss_layer = CustomMultiLossLayer(loss_num=6)  # 6
         
@@ -141,17 +142,30 @@ class MEAformer(nn.Module):
         # C_j: 固有因果置信度，初始化为一个中等偏上的先验值 (如 0.5)
         self.causal_Cj = {m: 0.5 for m in self.modal_names}
         # ====================================
+        # ================= 🚀 新增：离线实体级 PLM 属性模块 (可插拔) =================
+        self.plm_ent_attr = getattr(self.args, "plm_ent_attr", 0)
+        if self.plm_ent_attr == 1:
+            plm_hidden_dim = getattr(self.args, "plm_hidden_dim", 768)
+            target_dim = self.args.hidden_size 
+            self.plm_ent_adapter = nn.Sequential(
+                nn.Linear(plm_hidden_dim, target_dim),
+                nn.GELU(),
+                nn.LayerNorm(target_dim) 
+            )
+            self.plm_ent_fusion_norm = nn.LayerNorm(target_dim)
+            print(f"✅ MEAformer: Pluggable Entity PLM-Attr module initialized")
 
-        # 假设实体的总数是 ent_num，模态数是 modal_num (例如 6)
-        # modal_num = len(self.modal_names)
-        # # 初始化均匀权重，并使用 register_buffer 确保它不参与梯度计算，但能随模型保存
-        # self.register_buffer('alpha_prev', torch.ones(args.ent_num, modal_num) / modal_num)
+        self.plm_features = None 
+        # 在 __init__ 离线特征初始化的最底下加上这行：
+        # 定义一个极小的初始权重，让网络自己决定吸收多少 PLM 的信息
+        self.plm_gate = nn.Parameter(torch.tensor(0.01))
+        # =============================================================================
+        
 
-    def _extract_plm_features(self, input_texts=None):
+    def _extract_plm_features(self):
         """
-        通用特征提取：
-        如果 input_texts 为空，走原来的实体 tokenization 流程；
-        如果提供了 input_texts，则现场进行分词并提取特征。
+        专用名称特征提取：
+        利用冻结的 PLM 提取实体表面名称 (Surface Name) 的初始特征。
         """
         is_training = self.plm.training
         self.plm.eval()
@@ -159,24 +173,15 @@ class MEAformer(nn.Module):
         batch_size = 512
         
         with torch.set_grad_enabled(not self.args.freeze_plm):
-            if input_texts is not None:
-                # 现场对关系/属性名进行编码
-                device = next(self.plm.parameters()).device
-                for i in range(0, len(input_texts), batch_size):
-                    batch_texts = input_texts[i : i+batch_size]
-                    inputs = self.plm_tokenizer(batch_texts, max_length=self.args.plm_max_len, 
-                                                padding='max_length', truncation=True, return_tensors='pt').to(device)
-                    outputs = self.plm(**inputs)
-                    cls_emb = outputs.last_hidden_state[:, 0, :]
-                    all_embs.append(cls_emb)
-            else:
-                # 原有的实体名称特征提取逻辑
-                for i in range(0, self.plm_input_ids.shape[0], batch_size):
-                    b_ids = self.plm_input_ids[i : i+batch_size]
-                    b_mask = self.plm_attention_mask[i : i+batch_size]
-                    outputs = self.plm(input_ids=b_ids, attention_mask=b_mask)
-                    cls_emb = outputs.last_hidden_state[:, 0, :] 
-                    all_embs.append(cls_emb)
+            # 原有的实体名称特征提取逻辑 (用于 self.use_plm 开启时提取名字)
+            for i in range(0, self.plm_input_ids.shape[0], batch_size):
+                b_ids = self.plm_input_ids[i : i+batch_size]
+                b_mask = self.plm_attention_mask[i : i+batch_size]
+                
+                # 送入 PLM 提取特征
+                outputs = self.plm(input_ids=b_ids, attention_mask=b_mask)
+                cls_emb = outputs.last_hidden_state[:, 0, :] 
+                all_embs.append(cls_emb)
                     
         plm_features = torch.cat(all_embs, dim=0)
         
@@ -184,8 +189,6 @@ class MEAformer(nn.Module):
             self.plm.train()
             
         return plm_features
-
-
 
     def forward(self, input_batch, epoch=0, total_epochs=1):
         # 生成所有实体和隐藏层嵌入 (必须在最前面，为了后面统一获取 Device)
@@ -195,6 +198,38 @@ class MEAformer(nn.Module):
 
         # 动态获取所在设备，避免硬编码 .cuda() 或未定义的 self.device
         device = joint_emb.device 
+
+        # ================= 🚀 修改：安全的 PLM 残差融合 =================
+        if getattr(self, "plm_ent_attr", 0) == 1 and self.plm_features is not None:
+            plm_feat = self.plm_features.to(device)
+            adapted_attr = self.plm_ent_adapter(plm_feat)
+            
+            # 使用可学习的门控权重进行融合，彻底避免特征覆盖！
+            joint_emb = joint_emb + self.plm_gate * adapted_attr
+            joint_emb = self.plm_ent_fusion_norm(joint_emb)
+            
+            joint_emb_hid = joint_emb_hid + self.plm_gate * adapted_attr
+            joint_emb_hid = self.plm_ent_fusion_norm(joint_emb_hid)
+        # =====================================================================
+
+        # # ================= 🚀 新增：离线实体属性特征残差融合 =================
+        # # 此时 joint_emb 包含了所有实体的多模态特征，维度为 [ent_num, hidden_size]
+        # if getattr(self, "plm_ent_attr", 0) == 1 and self.plm_features is not None:
+        #     # 1. 确保离线特征在当前显卡上
+        #     plm_feat = self.plm_features.to(device)
+            
+        #     # 2. 降维并映射到图结构所在的语义空间
+        #     adapted_attr = self.plm_ent_adapter(plm_feat)
+            
+        #     # 3. 对全量实体的 joint_emb 进行残差注入并归一化
+        #     # 这一步直接提升了最终输出特征的质量，对 test() 的 Hits@k 指标有决定性帮助！
+        #     joint_emb = joint_emb + adapted_attr
+        #     joint_emb = self.plm_ent_fusion_norm(joint_emb)
+            
+        #     # 4. 同样注入到 hidden joint_emb，保持两个 View 对齐时的语义一致性
+        #     joint_emb_hid = joint_emb_hid + adapted_attr
+        #     joint_emb_hid = self.plm_ent_fusion_norm(joint_emb_hid)
+        # # =====================================================================
 
         # ====== 新增：初始化软权重 ======
         sample_weights = None 
@@ -288,12 +323,6 @@ class MEAformer(nn.Module):
         loss_dic = {"joint_Intra_modal": loss_joi.item(), "Intra_modal": in_loss.item()}
         output = {"loss_dic": loss_dic, "emb": joint_emb}
 
-        # if self.args.use_csc and self.training:
-        #     # 你需要透传 input_batch_idx (实体的绝对索引)，用于去 buffer 里拿历史权重
-        #     loss_csc = self.compute_csc_loss(input_idx, embs_list, joint_emb, weight_norm, epoch, total_epochs)
-        #     loss_all = loss_all + loss_csc
-        #     # 记录到字典输出给 Tensorboard
-        #     output["loss_dic"]["CSC_Loss"] = loss_csc.item() 
         # ====== 新增：构造 CSC 模块需要的输入 ======
         if self.args.use_csc and self.training:
             # 1. 打包 embs_list (注意顺序必须和 Encoder 里一致)
@@ -309,11 +338,6 @@ class MEAformer(nn.Module):
             loss_all = loss_all + loss_csc
             output["loss_dic"]["CSC_Loss"] = loss_csc.item()
         # ==========================================
-
-        
-        # # 准备输出
-        # loss_dic = {"joint_Intra_modal": loss_joi.item(), "Intra_modal": in_loss.item()}
-        # output = {"loss_dic": loss_dic, "emb": joint_emb}
 
         # ====== 新增：把因果参数传给主循环监控 ======
         if self.args.use_causal_bias and hasattr(self, 'current_causal_bias'):
@@ -335,7 +359,6 @@ class MEAformer(nn.Module):
         # =================================================
         
         return loss_all, output
-
 
 
 
@@ -373,44 +396,72 @@ class MEAformer(nn.Module):
     def joint_emb_generat(self, only_joint=True, epoch=0, total_epochs=1):
         # 计算因果偏置
         causal_bias = self._compute_causal_bias(epoch, total_epochs)
-        
+
         # 默认特征
         current_name_features = self.name_features
         current_rel_features = self.rel_features
         current_att_features = self.att_features
         
         if getattr(self, "use_plm", False):
-            # 1. 实体名称嵌入 (Surface)
-            if getattr(self.args, "plm_embed_name", 1) == 1:
+            # 1. 实体名称嵌入 (Surface) - 安全检查：只有原特征不为 None 才注入
+            if getattr(self.args, "plm_embed_name", 1) == 1 and self.name_features is not None:
                 if self.args.freeze_plm == 1:
                     current_name_features = F.normalize(self.plm_proj(self.static_plm_features), dim=1)
                 else:
                     plm_feats = self._extract_plm_features()
                     current_name_features = F.normalize(self.plm_proj(plm_feats), dim=1)
             
-            # 2. 关系文本语义嵌入 (Relation)
-            if getattr(self.args, "plm_embed_rel", 0) == 1 and hasattr(self, "rel_plm_proj"):
-                # 得到 1000 个关系的 300 维语义表示
+            # 2. 关系文本语义嵌入 (Relation) - 安全检查
+            if getattr(self.args, "plm_embed_rel", 0) == 1 and hasattr(self, "rel_plm_proj") and self.rel_features is not None:
                 rel_semantic = self.rel_plm_proj(self.rel_text_embs)
-                # ====== 🔥 核心修复：语义与结构残差融合 ======
                 rel_fused = rel_semantic + self.rel_id_shift
                 current_rel_features = torch.matmul(self.raw_rel_features, rel_fused)
                 current_rel_features = F.normalize(current_rel_features, dim=1)
-                # # 矩阵乘法：将实体的频次矩阵 [ent_num, 1000] @ 语义矩阵 [1000, 300] = [ent_num, 300]
-                # current_rel_features = torch.matmul(self.raw_rel_features, rel_semantic)
-                # current_rel_features = F.normalize(current_rel_features, dim=1)
                 
-            # 3. 属性文本语义嵌入 (Attribute)
-            if getattr(self.args, "plm_embed_attr", 0) == 1 and hasattr(self, "att_plm_proj"):
+            # 3. 属性文本语义嵌入 (Attribute) - 安全检查
+            if getattr(self.args, "plm_embed_attr", 0) == 1 and hasattr(self, "att_plm_proj") and self.att_features is not None:
                 att_semantic = self.att_plm_proj(self.att_text_embs)
-                # ====== 🔥 核心修复：语义与结构残差融合 ======
                 att_fused = att_semantic + self.att_id_shift
                 current_att_features = torch.matmul(self.raw_att_features, att_fused)
                 current_att_features = F.normalize(current_att_features, dim=1)
-                # # 矩阵乘法：[ent_num, 1000] @ [1000, 300] = [ent_num, 300]
-                # current_att_features = torch.matmul(self.raw_att_features, att_semantic)
-                # current_att_features = F.normalize(current_att_features, dim=1)
-        # ==========================================
+        
+        # # 默认特征
+        # current_name_features = self.name_features
+        # current_rel_features = self.rel_features
+        # current_att_features = self.att_features
+        
+        # if getattr(self, "use_plm", False):
+        #     # 1. 实体名称嵌入 (Surface)
+        #     if getattr(self.args, "plm_embed_name", 1) == 1:
+        #         if self.args.freeze_plm == 1:
+        #             current_name_features = F.normalize(self.plm_proj(self.static_plm_features), dim=1)
+        #         else:
+        #             plm_feats = self._extract_plm_features()
+        #             current_name_features = F.normalize(self.plm_proj(plm_feats), dim=1)
+            
+        #     # 2. 关系文本语义嵌入 (Relation)
+        #     if getattr(self.args, "plm_embed_rel", 0) == 1 and hasattr(self, "rel_plm_proj"):
+        #         # 得到 1000 个关系的 300 维语义表示
+        #         rel_semantic = self.rel_plm_proj(self.rel_text_embs)
+        #         # ====== 🔥 核心修复：语义与结构残差融合 ======
+        #         rel_fused = rel_semantic + self.rel_id_shift
+        #         current_rel_features = torch.matmul(self.raw_rel_features, rel_fused)
+        #         current_rel_features = F.normalize(current_rel_features, dim=1)
+        #         # # 矩阵乘法：将实体的频次矩阵 [ent_num, 1000] @ 语义矩阵 [1000, 300] = [ent_num, 300]
+        #         # current_rel_features = torch.matmul(self.raw_rel_features, rel_semantic)
+        #         # current_rel_features = F.normalize(current_rel_features, dim=1)
+                
+        #     # 3. 属性文本语义嵌入 (Attribute)
+        #     if getattr(self.args, "plm_embed_attr", 0) == 1 and hasattr(self, "att_plm_proj"):
+        #         att_semantic = self.att_plm_proj(self.att_text_embs)
+        #         # ====== 🔥 核心修复：语义与结构残差融合 ======
+        #         att_fused = att_semantic + self.att_id_shift
+        #         current_att_features = torch.matmul(self.raw_att_features, att_fused)
+        #         current_att_features = F.normalize(current_att_features, dim=1)
+        #         # # 矩阵乘法：[ent_num, 1000] @ [1000, 300] = [ent_num, 300]
+        #         # current_att_features = torch.matmul(self.raw_att_features, att_semantic)
+        #         # current_att_features = F.normalize(current_att_features, dim=1)
+        # # ==========================================
 
         # ⚠️ 把替换好的 current_*_features 传入 Encoder
         gph_emb, img_emb, rel_emb, att_emb, \
@@ -516,55 +567,55 @@ class MEAformer(nn.Module):
 
         return causal_bias
     
-    def compute_csc_loss(self, input_idx, embs_list,  weight_norm, epoch, total_epochs):
-        import torch.nn.functional as F
-        import math
+
+    def compute_csc_loss(self, input_idx, embs_list, weight_norm, epoch, total_epochs):
+        """
+        因果约束 v3.0: 反事实不变性 (Counterfactual Invariance)
+        通过屏蔽主导模态，强迫弱势模态学习真实因果特征，防止捷径学习。
+        """
+        valid_embs = [e for e in embs_list if e is not None]
+
+        # 随机采样，保证梯度稳定
+        N = weight_norm.shape[0]
+        sample_size = min(N, 2048) 
+        rand_idx = torch.randperm(N, device=weight_norm.device)[:sample_size]
+
+        curr_weights = weight_norm[rand_idx] # [B, M]
+        B, M = curr_weights.shape
+        stacked_embs = torch.stack([e[rand_idx] for e in valid_embs], dim=1) # [B, M, dim]
+
+        # 1. 原始的联合表征 (带有潜在的捷径依赖)
+        joint_emb = torch.sum(curr_weights.unsqueeze(2) * stacked_embs, dim=1)
+
+        # 2. 找到模型当前最依赖的“主导模态” (例如经常是 img)
+        _, dominant_idx = torch.max(curr_weights, dim=1)
+
+        # 3. 构造反事实权重：屏蔽掉这个主导模态！
+        mask = torch.ones_like(curr_weights)
+        batch_idx = torch.arange(B, device=curr_weights.device)
+        mask[batch_idx, dominant_idx] = 0.0 # 把最大的权重归零
         
-        # 1. 过滤掉被关闭的模态 (值为 None 的特征)
-        valid_embs = [emb for emb in embs_list if emb is not None]
-        valid_modal_num = len(valid_embs)
+        cf_weights = curr_weights * mask
+        # 重新归一化剩余的权重，让其他模态平摊注意力
+        cf_weights = cf_weights / (cf_weights.sum(dim=1, keepdim=True) + 1e-8)
+
+        # 4. 计算反事实表征 (没有主导模态参与的表征)
+        cf_joint = torch.sum(cf_weights.unsqueeze(2) * stacked_embs, dim=1)
+
+        # 5. 反事实一致性损失 (Counterfactual Consistency)
+        # 强迫模型：即使我剥夺了你最爱看的模态，你依然要给我生成一样的核心语义！
+        # 采用 MSE 损失拉近两者的距离，极其安全，不会破坏图空间
+        loss_csc = F.mse_loss(joint_emb, cf_joint)
+
+        # 动态退火：前期让模型自由学习，后期(epoch>30)加大干预力度，防止坍塌
+        progress = epoch / max(1, total_epochs)
+        lambda_t = math.sin((math.pi / 2.0) * progress) 
         
-        # 沿着维度1堆叠: 形状变为 [ent_num, valid_modal_num, hidden_size]
-        X = torch.stack(valid_embs, dim=1) 
-        
-        # 2. 处理 weight_norm (即 alpha_t)
-        if weight_norm.dim() == 3:
-            alpha_t = weight_norm.mean(dim=1)  # [ent_num, modal_num]
-        else:
-            alpha_t = weight_norm
+        # 将缩放因子调到合理的水平 (控制在总 Loss 的 10% 左右)
+        scale_factor = 10.0 
 
-        # 3. 动态初始化或校准 alpha_prev
-        if not hasattr(self, 'alpha_prev') or self.alpha_prev.size(1) != valid_modal_num:
-            self.register_buffer('alpha_prev', torch.ones(X.size(0), valid_modal_num, device=X.device) / valid_modal_num)
+        return scale_factor * lambda_t * loss_csc
 
-        # ====== 核心计算：事实融合表征 z_factual ======
-        # 用当前权重加权求和得到当前状态的表征
-        z_factual = torch.sum(alpha_t.unsqueeze(-1) * X, dim=1)
-
-        # ====== (正向) 时序平稳的反事实表征 z_prev ======
-        alpha_prev_batch = self.alpha_prev[input_idx].detach() 
-        z_prev = torch.sum(alpha_prev_batch.unsqueeze(-1) * X, dim=1) 
-
-        # 采用余弦距离计算 (Distance = 1 - Cosine Similarity)
-        # 只要保证模型当前状态 (z_factual) 和上一状态 (z_prev) 不要偏离太远即可
-        d_pos = 1.0 - F.cosine_similarity(z_factual, z_prev, dim=-1)
-        
-        # 【重要修改】：删除了 d_neg (远离均匀分布的约束)，避免模型为了逃避惩罚而走向极端单模态
-        loss_csc = d_pos.mean()
-
-        # ======== CSC 模块的延迟预热 (Warm-up) 机制 ========
-        if epoch < 50:
-            # 前 50 个 Epoch 绝对不干预！
-            # 让模型靠基础 Loss 自由探索，建立起健康的正向历史锚点
-            lambda_t = 0.0  
-        else:
-            # 10 轮之后，健康的锚点已经成型，逐渐加大约束力度，防止模型在后续训练中震荡或灾难性遗忘
-            lambda_t = self.args.csc_lambda_0 * ((epoch - 10) / (total_epochs - 10))
-
-        # 更新历史权重 buffer，供下一个 Epoch 使用 (记得 detach 截断梯度)
-        self.alpha_prev[input_idx] = alpha_t.detach()
-
-        return lambda_t * loss_csc
     
 
     def _register_grad_hooks(self, embs_dict):

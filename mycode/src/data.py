@@ -148,13 +148,13 @@ def load_eva_data(logger, args):
         logger.info(f"name feature shape:{name_features.shape}")
         logger.info(f"char feature shape:{char_features.shape}")
 
+
     # ====== 新增 PLM 数据加载 ======
     if hasattr(args, 'use_plm') and args.use_plm == 1:
         if args.w_name or args.w_char:
             if args.data_choice == "DBP15K":
                 name_path = os.path.join(args.data_path, "DBP15K", "translated_ent_name", "dbp_" + args.data_split + ".json")
             elif args.data_choice == "FBDB15K":
-                # 指向你刚刚生成的文件
                 name_path = os.path.join(args.data_path, "FBDB15K", "ent_name.json") 
             elif args.data_choice == "FBYG15K":
                 name_path = os.path.join(args.data_path, "FBYG15K", "ent_name.json")
@@ -163,23 +163,8 @@ def load_eva_data(logger, args):
                 
             if osp.exists(name_path):
                 plm_input_ids, plm_attention_mask = load_plm_tokens(ENT_NUM, name_path, args, logger)
-                
-                # 2. ⚠️ 关键防崩补丁 ⚠️
-                # 动态获取维度，防止与命令行参数冲突
-                char_dim = args.char_dim if hasattr(args, 'char_dim') else 300
-                name_dim = args.name_dim if hasattr(args, 'name_dim') else 300
-                
-                # 补齐字符特征（直接生成 PyTorch 张量）
-                if char_features is None:
-                    char_features = torch.zeros((ENT_NUM, char_dim), dtype=torch.float32)
-                
-                # 补齐名字特征（直接生成 PyTorch 张量）
-                if name_features is None:
-                    name_features = torch.zeros((ENT_NUM, name_dim), dtype=torch.float32)
-                
             else:
                 logger.info(f"Warning: {name_path} not found. Skipping PLM.")
-    # ===============================
 
 
     if args.unsup:
@@ -323,6 +308,20 @@ def load_eva_data(logger, args):
     #train_ill = EADataset(train_ill)
     test_ill = EADataset(test_ill)
 
+    # ================= 新增：受控读取离线 PLM 属性特征 =================
+    plm_features = None
+    # 只有当全局开启 PLM，并且明确开启了属性嵌入时，才加载特征
+    if getattr(args, 'use_plm', 0) == 1 and getattr(args, 'plm_embed_attr', 0) == 1:
+        plm_feat_path = os.path.join(file_dir, 'plm_attribute_features.npy')
+        if os.path.exists(plm_feat_path):
+            plm_features = np.load(plm_feat_path)
+            logger.info(f"✅ Ablation: PLM Attribute Embedding is ON. Loaded shape: {plm_features.shape}")
+        else:
+            logger.warning(f"⚠️ PLM attr feature file not found at {plm_feat_path}. Skipping.")
+    else:
+        logger.info("⏸️ Ablation: PLM Attribute Embedding is OFF.")
+    # ==============================================================
+
     return {
         'ent_num': ENT_NUM,
         'rel_num': REL_NUM,
@@ -333,10 +332,11 @@ def load_eva_data(logger, args):
         'char_features': char_features,
         'input_idx': input_idx,
         'adj': adj,
-        'plm_input_ids': plm_input_ids,            # 新增返回
-        'plm_attention_mask': plm_attention_mask,   # 新增返回
-        'rel_texts': rel_texts,                    # ⚠️ 新增返回：关系文本列表
-        'attr_texts': attr_texts                   # ⚠️ 新增返回：属性文本列表
+        'plm_input_ids': plm_input_ids,
+        'plm_attention_mask': plm_attention_mask,
+        'rel_texts': rel_texts,
+        'attr_texts': attr_texts,
+        'plm_features': plm_features  # 将特征传给 main.py
     }, {"left": left_non_train, "right": right_non_train}, train_ill, test_ill, eval_ill, test_ill_
 
 
