@@ -35,7 +35,7 @@ class cfg():
         # parser.add_argument("--data_rate", type=float, default=0.3, choices=[0.2, 0.3, 0.5, 0.8], help="training set rate")
 
         # ====== 新增：模块一 样本调度机制 ======
-        parser.add_argument("--k", default=0.5, type=float, 
+        parser.add_argument("--k", default=6, type=float, 
                     help="调度速度系数，控制样本引入速度（指数衰减参数）")
         parser.add_argument("--lambda_val", default=0.2, type=float,
                     help="结构稀疏度权重（0-1），用于计算样本难度：λ·ρ_struct + (1-λ)·ρ_modal")
@@ -46,7 +46,7 @@ class cfg():
         # ====== 新增：模块二 动态因果效应加权机制参数 ======
         parser.add_argument("--use_causal_bias", default=1, type=int, choices=[0, 1],
                     help="消融实验开关：是否启用动态因果加权机制 (1: 开启, 0: 关闭)")
-        parser.add_argument("--causal_lambda", default=1.0, type=float,
+        parser.add_argument("--causal_lambda", default=0.1, type=float,
                     help="公式中的 λ：因果引导偏置项的整体强度")
         parser.add_argument("--causal_gamma", default=0.9, type=float,
                     help="计算瞬时因果效应 D_j 的滑动平均因子 (平滑因子)")
@@ -58,7 +58,7 @@ class cfg():
 
         # ====== 新增：模块三 反事实平滑约束参数 ======
         parser.add_argument("--use_csc", default=1, type=int, choices=[0, 1], help="是否启用反事实平滑约束")
-        parser.add_argument("--csc_lambda_0", default=1.0, type=float, help="初始平滑强度 lambda_0")
+        parser.add_argument("--csc_lambda_0", default=0.1, type=float, help="初始平滑强度 lambda_0")
         parser.add_argument("--csc_eta", default=5.0, type=float, help="衰减速率控制参数 eta")
         parser.add_argument("--csc_gamma", default=0.1, type=float, help="反事实对比的间隔 Margin")
         # =============================================

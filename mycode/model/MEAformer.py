@@ -192,26 +192,6 @@ class MEAformer(nn.Module):
         return plm_features
 
     def forward(self, input_batch, epoch=0, total_epochs=1):
-        # 生成所有实体和隐藏层嵌入 (必须在最前面，为了后面统一获取 Device)
-        # gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states, weight_norm = self.joint_emb_generat(only_joint=False, epoch=epoch, total_epochs=total_epochs)
-        # # gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb, hidden_states = self.joint_emb_generat(only_joint=False, epoch=epoch, total_epochs=total_epochs)
-        # gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, joint_emb_hid = self.generate_hidden_emb(hidden_states)
-
-        # # 动态获取所在设备，避免硬编码 .cuda() 或未定义的 self.device
-        # device = joint_emb.device 
-
-        # # ================= 🚀 修改：安全的 PLM 残差融合 =================
-        # if getattr(self, "plm_ent_attr", 0) == 1 and self.plm_features is not None:
-        #     plm_feat = self.plm_features.to(device)
-        #     adapted_attr = self.plm_ent_adapter(plm_feat)
-            
-        #     # 使用可学习的门控权重进行融合，彻底避免特征覆盖！
-        #     joint_emb = joint_emb + self.plm_gate * adapted_attr
-        #     joint_emb = self.plm_ent_fusion_norm(joint_emb)
-            
-        #     joint_emb_hid = joint_emb_hid + self.plm_gate * adapted_attr
-        #     joint_emb_hid = self.plm_ent_fusion_norm(joint_emb_hid)
-        # # =====================================================================
         device = self.input_idx.device # 安全获取设备
         
         # ================= 🚀 核心创新：前置语义拦截注入 =================
@@ -244,23 +224,19 @@ class MEAformer(nn.Module):
                 torch.tensor(input_batch['ent2'], dtype=torch.int64, device=device)
             ], dim=1)
             difficulties = torch.tensor(input_batch['difficulties'], device=device)
-            
-            # ====== 核心创新：软加权 (Soft Weighting) 调度 ======
+
+            # 在 forward() 的样本调度部分
             if self.args.use_sample_schedule == 1 and self.training:
-                # ======s型曲线========(k=10-12)
-                # 1. 计算当前的训练进度比例 (0.0 ~ 1.0)
                 progress = epoch / total_epochs
-                # 2. 【核心优化】使用 S 型曲线 (Sigmoid) 替代指数曲线
-                # 以 progress = 0.5 为中点。k 值控制 S 曲线中间的陡峭程度。
                 threshold = 1.0 / (1.0 + math.exp(-self.args.k * (progress - 0.5)))
                 
-                # 3. 计算标准的软权重
-                sample_weights = torch.exp(- (difficulties - threshold).clamp(min=0))
+                # 软权重计算（保留）
+                sample_weights = torch.exp(-(difficulties - threshold).clamp(min=0))
                 
-                # 4. 绝对噪声天花板 (坚决保留这个防毒面具)
-                noise_ceiling = 0.85 
-                noise_mask = (difficulties <= noise_ceiling).float()
-                sample_weights = sample_weights * noise_mask
+                # 【修改】去掉 noise_ceiling 硬截断！
+                # 改用温和的下界限制，保证最难的样本也有一定的学习权重
+                sample_weights = sample_weights.clamp(min=0.05)
+                
 
 
         else:  # 测试数据（无难度信息）
@@ -312,9 +288,11 @@ class MEAformer(nn.Module):
             loss_joi = self.criterion_cl_joint(joint_emb, batch_tensor, sample_weights=sample_weights)
         
         # 计算内部视图损失与输出视图损失
-        # 【修改】完全丢弃原来的 difficulties 判断，统一传入计算好的 sample_weights
-        in_loss = self.inner_view_loss(gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, batch_tensor, sample_weights=sample_weights)
-        out_loss = self.inner_view_loss(gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, name_emb_hid, char_emb_hid, batch_tensor, sample_weights=sample_weights)
+        in_loss = self.inner_view_loss(gph_emb, rel_emb, att_emb, img_emb, name_emb, char_emb, 
+                                batch_tensor, sample_weights=sample_weights)
+        out_loss = self.inner_view_loss(gph_emb_hid, rel_emb_hid, att_emb_hid, img_emb_hid, 
+                                 name_emb_hid, char_emb_hid, batch_tensor, 
+                                 sample_weights=sample_weights)
         
 
         # 总损失
@@ -326,21 +304,21 @@ class MEAformer(nn.Module):
         loss_dic = {"joint_Intra_modal": loss_joi.item(), "Intra_modal": in_loss.item()}
         output = {"loss_dic": loss_dic, "emb": joint_emb}
 
-        # ====== 新增：构造 CSC 模块需要的输入 ======
-        if self.args.use_csc and self.training:
-            # 1. 打包 embs_list (注意顺序必须和 Encoder 里一致)
-            embs_list = [img_emb, att_emb, rel_emb, gph_emb, name_emb, char_emb]
+        # # ====== 新增：构造 CSC 模块需要的输入 ======
+        # if self.args.use_csc and self.training:
+        #     # 1. 打包 embs_list (注意顺序必须和 Encoder 里一致)
+        #     embs_list = [img_emb, att_emb, rel_emb, gph_emb, name_emb, char_emb]
             
-            # 2. 获取所有实体的索引
-            input_idx = self.input_idx
+        #     # 2. 获取所有实体的索引
+        #     input_idx = self.input_idx
             
-            # 3. 计算反事实约束 Loss (传入打包好的变量)
-            loss_csc = self.compute_csc_loss(input_idx, embs_list, weight_norm, epoch, total_epochs)
+        #     # 3. 计算反事实约束 Loss (传入打包好的变量)
+        #     loss_csc = self.compute_csc_loss(input_idx, embs_list, weight_norm, epoch, total_epochs)
             
-            # 4. 叠加 Loss 并记录
-            loss_all = loss_all + loss_csc
-            output["loss_dic"]["CSC_Loss"] = loss_csc.item()
-        # ==========================================
+        #     # 4. 叠加 Loss 并记录
+        #     loss_all = loss_all + loss_csc
+        #     output["loss_dic"]["CSC_Loss"] = loss_csc.item()
+        # # ==========================================
 
         # ====== 新增：把因果参数传给主循环监控 ======
         if self.args.use_causal_bias and hasattr(self, 'current_causal_bias'):
@@ -397,9 +375,11 @@ class MEAformer(nn.Module):
 
 
     def joint_emb_generat(self, only_joint=True, epoch=0, total_epochs=1):
-        # 计算因果偏置
-        causal_bias = self._compute_causal_bias(epoch, total_epochs)
-
+        # 【修改】只更新 C_j 等因果信号状态（用于推理时融合），不把 bias 注入 attention
+        if self.args.use_causal_bias and self.training:
+            self._compute_causal_bias(epoch, total_epochs)
+        causal_bias = None  # 始终传 None，不干扰训练时的注意力
+    
         # 默认特征
         current_name_features = self.name_features
         current_rel_features = self.rel_features
@@ -427,53 +407,15 @@ class MEAformer(nn.Module):
                 att_fused = att_semantic + self.att_id_shift
                 current_att_features = torch.matmul(self.raw_att_features, att_fused)
                 current_att_features = F.normalize(current_att_features, dim=1)
-        
-        # # 默认特征
-        # current_name_features = self.name_features
-        # current_rel_features = self.rel_features
-        # current_att_features = self.att_features
-        
-        # if getattr(self, "use_plm", False):
-        #     # 1. 实体名称嵌入 (Surface)
-        #     if getattr(self.args, "plm_embed_name", 1) == 1:
-        #         if self.args.freeze_plm == 1:
-        #             current_name_features = F.normalize(self.plm_proj(self.static_plm_features), dim=1)
-        #         else:
-        #             plm_feats = self._extract_plm_features()
-        #             current_name_features = F.normalize(self.plm_proj(plm_feats), dim=1)
-            
-        #     # 2. 关系文本语义嵌入 (Relation)
-        #     if getattr(self.args, "plm_embed_rel", 0) == 1 and hasattr(self, "rel_plm_proj"):
-        #         # 得到 1000 个关系的 300 维语义表示
-        #         rel_semantic = self.rel_plm_proj(self.rel_text_embs)
-        #         # ====== 🔥 核心修复：语义与结构残差融合 ======
-        #         rel_fused = rel_semantic + self.rel_id_shift
-        #         current_rel_features = torch.matmul(self.raw_rel_features, rel_fused)
-        #         current_rel_features = F.normalize(current_rel_features, dim=1)
-        #         # # 矩阵乘法：将实体的频次矩阵 [ent_num, 1000] @ 语义矩阵 [1000, 300] = [ent_num, 300]
-        #         # current_rel_features = torch.matmul(self.raw_rel_features, rel_semantic)
-        #         # current_rel_features = F.normalize(current_rel_features, dim=1)
-                
-        #     # 3. 属性文本语义嵌入 (Attribute)
-        #     if getattr(self.args, "plm_embed_attr", 0) == 1 and hasattr(self, "att_plm_proj"):
-        #         att_semantic = self.att_plm_proj(self.att_text_embs)
-        #         # ====== 🔥 核心修复：语义与结构残差融合 ======
-        #         att_fused = att_semantic + self.att_id_shift
-        #         current_att_features = torch.matmul(self.raw_att_features, att_fused)
-        #         current_att_features = F.normalize(current_att_features, dim=1)
-        #         # # 矩阵乘法：[ent_num, 1000] @ [1000, 300] = [ent_num, 300]
-        #         # current_att_features = torch.matmul(self.raw_att_features, att_semantic)
-        #         # current_att_features = F.normalize(current_att_features, dim=1)
-        # # ==========================================
 
-        # ⚠️ 把替换好的 current_*_features 传入 Encoder
+        # ... 后面 encoder 调用中 causal_bias=None ...
         gph_emb, img_emb, rel_emb, att_emb, \
             name_emb, char_emb, joint_emb, hidden_states, weight_norm = self.multimodal_encoder(
                 self.input_idx, self.adj, self.img_features, 
                 current_rel_features, current_att_features, 
                 current_name_features, self.char_features,
-                causal_bias=causal_bias 
-            )
+                causal_bias=None  # 不再注入 attention！
+        )
         
 
         # 绑定梯度捕获 (只在重新生成嵌入时挂载 Hook)
@@ -573,88 +515,49 @@ class MEAformer(nn.Module):
 
     def compute_csc_loss(self, input_idx, embs_list, weight_norm, epoch, total_epochs):
         """
-        因果独立机制约束 (Independent Causal Mechanisms, ICM)
-        论文叙事：真实的因果机制应当是相互独立的。为了防止晚期训练中所有模态坍塌
-        成同一种捷径特征 (Shortcut)，我们强制各模态的表征空间保持正交独立。
+        反事实一致性约束 (Counterfactual Sufficiency Constraint)
         """
         valid_embs = [e for e in embs_list if e is not None]
+        if len(valid_embs) < 2 or weight_norm is None:
+            return torch.tensor(0.0, device=self.input_idx.device)
+
         N = weight_norm.shape[0]
-        sample_size = min(N, 2048) 
+        sample_size = min(N, 2048)
         rand_idx = torch.randperm(N, device=weight_norm.device)[:sample_size]
 
-        # 获取各模态特征: [B, M, dim]
-        stacked_embs = torch.stack([e[rand_idx] for e in valid_embs], dim=1) 
-        B, M, D = stacked_embs.shape
+        sampled_embs = [F.normalize(e[rand_idx], dim=-1) for e in valid_embs]
+        curr_weights = weight_norm[rand_idx]
 
-        # 对特征进行 L2 归一化，以便计算余弦相似度
-        stacked_embs = F.normalize(stacked_embs, p=2, dim=-1)
-        
-        # 计算同一个实体内部，不同模态之间的相关性矩阵 [B, M, M]
-        sim_matrix = torch.bmm(stacked_embs, stacked_embs.transpose(1, 2))
-        
-        # 构造目标矩阵：单位阵 [B, M, M] (对角线为1，非对角线为0)
-        # 意义：自身与自身高度相关(1)，不同模态之间尽量正交无冗余(0)
-        I = torch.eye(M, device=sim_matrix.device).unsqueeze(0).expand(B, M, M)
-        
-        # 核心约束：ICM 冗余最小化 (极其安全，绝对不会撕裂跨图谱的对齐空间)
-        loss_icm = F.mse_loss(sim_matrix, I)
+        # Teacher: 联合表征
+        stacked = torch.stack(sampled_embs, dim=1)
+        teacher_emb = torch.sum(curr_weights.unsqueeze(2) * stacked, dim=1)
+        teacher_emb = F.normalize(teacher_emb.detach(), dim=-1)
 
+        # Student: 每个模态独立与 teacher 做对比对齐
+        tau_distill = self.args.tau
+        loss_distill = 0.0
+
+        for m_idx in range(len(valid_embs)):
+            student = sampled_embs[m_idx]
+            logits = torch.mm(student, teacher_emb.t()) / tau_distill
+            labels = torch.arange(sample_size, device=logits.device)
+            loss_m = F.cross_entropy(logits, labels)
+            loss_distill += loss_m
+
+        loss_distill = loss_distill / len(valid_embs)
+
+        # ====== 改动1: 退火方向反转 —— 前期强约束建立基础，后期放松让模型精细调整 ======
         progress = epoch / max(1, total_epochs)
-        # 同样使用正弦曲线，前期自由对齐，后期加强约束防止坍塌
-        lambda_t = math.sin((math.pi / 2.0) * progress) 
-        
-        # 将缩放因子调到一个温和的级别
-        scale_factor = 5.0 
+        # 余弦退火：从 1.0 平滑衰减到 0
+        lambda_t = 0.5 * (1.0 + math.cos(math.pi * progress))
 
-        return scale_factor * lambda_t * loss_icm
+        # ====== 改动2: 量级缩放 —— 将 CSC loss 压缩到主 loss 的 5-10% ======
+        # InfoNCE 原始量级约 4-6，主 loss (joint) 约 1-2
+        # 目标：CSC 贡献约 0.1 ~ 0.3，所以需要除以一个归一化因子
+        normalizer = max(loss_distill.item(), 1.0)  # 防止除零
+        loss_distill_normalized = loss_distill / normalizer  # 归一化到 ~1.0 附近
 
-    # def compute_csc_loss(self, input_idx, embs_list, weight_norm, epoch, total_epochs):
-    #     """
-    #     因果约束 v3.0: 反事实不变性 (Counterfactual Invariance)
-    #     通过屏蔽主导模态，强迫弱势模态学习真实因果特征，防止捷径学习。
-    #     """
-    #     valid_embs = [e for e in embs_list if e is not None]
-
-    #     # 随机采样，保证梯度稳定
-    #     N = weight_norm.shape[0]
-    #     sample_size = min(N, 2048) 
-    #     rand_idx = torch.randperm(N, device=weight_norm.device)[:sample_size]
-
-    #     curr_weights = weight_norm[rand_idx] # [B, M]
-    #     B, M = curr_weights.shape
-    #     stacked_embs = torch.stack([e[rand_idx] for e in valid_embs], dim=1) # [B, M, dim]
-
-    #     # 1. 原始的联合表征 (带有潜在的捷径依赖)
-    #     joint_emb = torch.sum(curr_weights.unsqueeze(2) * stacked_embs, dim=1)
-
-    #     # 2. 找到模型当前最依赖的“主导模态” (例如经常是 img)
-    #     _, dominant_idx = torch.max(curr_weights, dim=1)
-
-    #     # 3. 构造反事实权重：屏蔽掉这个主导模态！
-    #     mask = torch.ones_like(curr_weights)
-    #     batch_idx = torch.arange(B, device=curr_weights.device)
-    #     mask[batch_idx, dominant_idx] = 0.0 # 把最大的权重归零
-        
-    #     cf_weights = curr_weights * mask
-    #     # 重新归一化剩余的权重，让其他模态平摊注意力
-    #     cf_weights = cf_weights / (cf_weights.sum(dim=1, keepdim=True) + 1e-8)
-
-    #     # 4. 计算反事实表征 (没有主导模态参与的表征)
-    #     cf_joint = torch.sum(cf_weights.unsqueeze(2) * stacked_embs, dim=1)
-
-    #     # 5. 反事实一致性损失 (Counterfactual Consistency)
-    #     # 强迫模型：即使我剥夺了你最爱看的模态，你依然要给我生成一样的核心语义！
-    #     # 采用 MSE 损失拉近两者的距离，极其安全，不会破坏图空间
-    #     loss_csc = F.mse_loss(joint_emb, cf_joint)
-
-    #     # 动态退火：前期让模型自由学习，后期(epoch>30)加大干预力度，防止坍塌
-    #     progress = epoch / max(1, total_epochs)
-    #     lambda_t = math.sin((math.pi / 2.0) * progress) 
-        
-    #     # 将缩放因子调到合理的水平 (控制在总 Loss 的 10% 左右)
-    #     scale_factor = 10.0 
-
-    #     return scale_factor * lambda_t * loss_csc
+        return self.args.csc_lambda_0 * lambda_t * loss_distill_normalized
 
     
 

@@ -535,30 +535,139 @@ class Runner:
         self.logger.info(" --------------------- Test result --------------------- ")
         self._test(test_left, test_right, last_epoch=last_epoch, save_name=save_name)
 
+
+
+    
     def _test(self, test_left, test_right, last_epoch=False, save_name="", loss=None):
         with torch.no_grad():
             w_normalized = None
             if self.args.model_name in ["MEAformer"]:
                 final_emb, weight_norm = self.model.joint_emb_generat()
+                
+                # ====== 新增：获取各模态独立 embedding，供推理时融合使用 ======
+                need_modal_embs = (getattr(self.args, 'use_causal_bias', 0) == 1) or \
+                                (getattr(self.args, 'use_csc', 0) == 1)
+                if need_modal_embs:
+                    gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, _, _, _ = \
+                        self.model.joint_emb_generat(only_joint=False)
+                else:
+                    gph_emb = img_emb = rel_emb = att_emb = name_emb = char_emb = None
+                # ============================================================
             else:
                 final_emb = self.model.joint_emb_generat()
                 weight_norm = None
+                gph_emb = img_emb = rel_emb = att_emb = name_emb = char_emb = None
             final_emb = F.normalize(final_emb)
+        # with torch.no_grad():
+        #     w_normalized = None
+        #     if self.args.model_name in ["MEAformer"]:
+        #         final_emb, weight_norm = self.model.joint_emb_generat()
+        #     else:
+        #         final_emb = self.model.joint_emb_generat()
+        #         weight_norm = None
+        #     final_emb = F.normalize(final_emb)
+
+            # ====== 模块三：推理时反事实融合 ======
+            cf_emb = None
+            if self.args.use_csc and self.args.model_name in ["MEAformer"] and weight_norm is not None:
+                # 获取各模态的独立 embedding
+                gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, _, _, _ = \
+                    self.model.joint_emb_generat(only_joint=False)
+                
+                modal_embs = [e for e in [img_emb, att_emb, rel_emb, gph_emb, name_emb, char_emb] if e is not None]
+                
+                if len(modal_embs) >= 2:
+                    stacked = torch.stack([F.normalize(e, dim=-1) for e in modal_embs], dim=1)  # [N, M, dim]
+                    
+                    # 找到每个实体的主导模态，构造去掉主导模态的反事实表征
+                    _, dominant_idx = torch.max(weight_norm, dim=1)  # [N]
+                    mask = torch.ones_like(weight_norm)
+                    mask.scatter_(1, dominant_idx.unsqueeze(1), 0.0)
+                    cf_weights = weight_norm * mask
+                    cf_weights = cf_weights / (cf_weights.sum(dim=1, keepdim=True) + 1e-8)
+                    
+                    cf_joint = torch.sum(cf_weights.unsqueeze(2) * stacked, dim=1)  # [N, dim]
+                    cf_emb = F.normalize(torch.cat([cf_joint], dim=1))  # [N, dim] 注意这里维度是 dim 不是 M*dim
+                    
+                    # 拼接事实表征和反事实表征
+                    # final_emb 是 [N, M*dim]，cf_emb 是 [N, dim]
+                    # 用加权平均的方式融合距离
+            # =============================================
 
         # pdb.set_trace()
         top_k = [1, 10, 50]
         acc_l2r = np.zeros((len(top_k)), dtype=np.float32)
         acc_r2l = np.zeros((len(top_k)), dtype=np.float32)
         test_total, test_loss, mean_l2r, mean_r2l, mrr_l2r, mrr_r2l = 0, 0., 0., 0., 0., 0.
+        
         if self.args.distance == 2:
             distance = pairwise_distances(final_emb[test_left], final_emb[test_right])
         elif self.args.distance == 1:
             distance = torch.FloatTensor(scipy.spatial.distance.cdist(
                 final_emb[test_left].cpu().data.numpy(),
                 final_emb[test_right].cpu().data.numpy(), metric="cityblock"))
+            # ==================== 模块二：因果置信度感知的推理时距离融合 ====================
+        if getattr(self.args, 'use_causal_bias', 0) == 1 and self.args.model_name in ["MEAformer"]:
+            # 获取模型里维护的因果置信度 C_j
+            causal_Cj = self.model.module.causal_Cj if self.args.dist else self.model.causal_Cj
+            
+            modal_emb_dict = {'img': img_emb, 'att': att_emb, 'rel': rel_emb, 
+                            'gph': gph_emb, 'name': name_emb, 'char': char_emb}
+            
+            modal_distances = []
+            modal_weights = []
+            for m_name, m_emb in modal_emb_dict.items():
+                if m_emb is None:
+                    continue
+                Cj = causal_Cj.get(m_name, 0.0)
+                # 只使用置信度超过阈值的模态（过滤掉单独没用的模态）
+                if Cj < 0.05:
+                    continue
+                m_emb_norm = F.normalize(m_emb)
+                m_dist = pairwise_distances(m_emb_norm[test_left], m_emb_norm[test_right])
+                modal_distances.append(m_dist)
+                modal_weights.append(Cj)
+            
+            if len(modal_distances) > 0:
+                # 归一化权重
+                weights_sum = sum(modal_weights)
+                modal_weights = [w / weights_sum for w in modal_weights]
+                # 加权融合单模态距离，作为"因果置信距离"
+                causal_distance = sum(w * d for w, d in zip(modal_weights, modal_distances))
+                # 与 joint 距离融合
+                causal_alpha = getattr(self.args, 'causal_lambda', 0.1)
+                distance = (1 - causal_alpha) * distance + causal_alpha * causal_distance
+                self.logger.info(f"[Module 2] Causal fusion applied: alpha={causal_alpha}, "
+                                f"used {len(modal_distances)} modalities")
+        # ==============================================================================
+        
+        # ==================== 模块三：反事实决策一致性融合 ====================
+        if getattr(self.args, 'use_csc', 0) == 1 and self.args.model_name in ["MEAformer"] and weight_norm is not None:
+            modal_embs_list = [e for e in [img_emb, att_emb, rel_emb, gph_emb, name_emb, char_emb] if e is not None]
+            M = len(modal_embs_list)
+            
+            if M >= 2:
+                # 构造反事实场景：假设模型无先验注意力偏好（均匀权重融合）
+                stacked = torch.stack([F.normalize(e, dim=-1) for e in modal_embs_list], dim=1)  # [N, M, dim]
+                uniform_weights = torch.ones(stacked.shape[0], M, device=stacked.device) / M
+                cf_joint = torch.sum(uniform_weights.unsqueeze(2) * stacked, dim=1)  # [N, dim]
+                cf_joint = F.normalize(cf_joint)
+                
+                cf_distance = pairwise_distances(cf_joint[test_left], cf_joint[test_right])
+                
+                # 融合：事实距离为主，反事实距离做辅助验证
+                csc_alpha = getattr(self.args, 'csc_lambda_0', 0.1)
+                distance = (1 - csc_alpha) * distance + csc_alpha * cf_distance
+                self.logger.info(f"[Module 3] Counterfactual fusion applied: alpha={csc_alpha}")
+        # ====================================================================
+        
         if self.args.csls is True:
             distance = 1 - csls_sim(1 - distance, self.args.csls_k)
-
+        
+        if self.args.csls is True:
+            distance = 1 - csls_sim(1 - distance, self.args.csls_k)
+        
+        # ... 后面不变 ...
         if last_epoch:
             to_write = []
             test_left_np = test_left.cpu().numpy()
@@ -620,11 +729,119 @@ class Runner:
             self.logger.info(f"Ep {self.epoch} | l2r: acc of top {top_k} = {acc_l2r}, mr = {mean_l2r:.3f}, mrr = {mrr_l2r:.3f}{Loss_out}")
             self.logger.info(f"Ep {self.epoch} | r2l: acc of top {top_k} = {acc_r2l}, mr = {mean_r2l:.3f}, mrr = {mrr_r2l:.3f}{Loss_out}")
             self.early_stop_count -= 1
+            # ====== 新增：将评估指标写入 TensorBoard ======
+            if hasattr(self, 'writer') and self.writer is not None and self.epoch != "Test":
+                self.writer.add_scalar('eval/Hits_at_1', acc_l2r[0], self.epoch)
+                self.writer.add_scalar('eval/Hits_at_10', acc_l2r[1], self.epoch)
+                self.writer.add_scalar('eval/Hits_at_50', acc_l2r[2], self.epoch)
+                self.writer.add_scalar('eval/MRR', mrr_l2r, self.epoch)
+                self.writer.add_scalar('eval/MR', mean_l2r, self.epoch)
+            # =============================================
         if not self.args.only_test and mrr_l2r > max(self.loss_log.acc) and not last_epoch:
             self.logger.info(f"Best model update in Ep {self.epoch}: MRR from [{max(self.loss_log.acc)}] --> [{mrr_l2r}] ... ")
             self.loss_log.update_acc(mrr_l2r)
             self.early_stop_count = self.early_stop_init
             self.best_model_wts = copy.deepcopy(self.model.state_dict())
+
+
+    # def _test(self, test_left, test_right, last_epoch=False, save_name="", loss=None):
+    #     with torch.no_grad():
+    #         w_normalized = None
+    #         if self.args.model_name in ["MEAformer"]:
+    #             final_emb, weight_norm = self.model.joint_emb_generat()
+    #         else:
+    #             final_emb = self.model.joint_emb_generat()
+    #             weight_norm = None
+    #         final_emb = F.normalize(final_emb)
+
+    #     # pdb.set_trace()
+    #     top_k = [1, 10, 50]
+    #     acc_l2r = np.zeros((len(top_k)), dtype=np.float32)
+    #     acc_r2l = np.zeros((len(top_k)), dtype=np.float32)
+    #     test_total, test_loss, mean_l2r, mean_r2l, mrr_l2r, mrr_r2l = 0, 0., 0., 0., 0., 0.
+    #     if self.args.distance == 2:
+    #         distance = pairwise_distances(final_emb[test_left], final_emb[test_right])
+    #     elif self.args.distance == 1:
+    #         distance = torch.FloatTensor(scipy.spatial.distance.cdist(
+    #             final_emb[test_left].cpu().data.numpy(),
+    #             final_emb[test_right].cpu().data.numpy(), metric="cityblock"))
+    #     if self.args.csls is True:
+    #         distance = 1 - csls_sim(1 - distance, self.args.csls_k)
+
+    #     if last_epoch:
+    #         to_write = []
+    #         test_left_np = test_left.cpu().numpy()
+    #         test_right_np = test_right.cpu().numpy()
+    #         to_write.append(["idx", "rank", "query_id", "gt_id", "ret1", "ret2", "ret3", "v1", "v2", "v3"])
+    #     for idx in range(test_left.shape[0]):
+    #         values, indices = torch.sort(distance[idx, :], descending=False)
+    #         rank = (indices == idx).nonzero(as_tuple=False).squeeze().item()
+    #         mean_l2r += (rank + 1)
+    #         mrr_l2r += 1.0 / (rank + 1)
+    #         for i in range(len(top_k)):
+    #             if rank < top_k[i]:
+    #                 acc_l2r[i] += 1
+    #         if last_epoch:
+    #             indices = indices.cpu().numpy()
+    #             to_write.append([idx, rank, test_left_np[idx], test_right_np[idx], test_right_np[indices[0]], test_right_np[indices[1]],
+    #                              test_right_np[indices[2]], round(values[0].item(), 4), round(values[1].item(), 4), round(values[2].item(), 4)])
+    #     if last_epoch:
+    #         import csv
+    #         if save_name == "":
+    #             save_name = self.args.model_name
+    #         save_pred_path = osp.join(self.args.data_path, self.args.model_name, f"{save_name}_pred")
+    #         os.makedirs(save_pred_path, exist_ok=True)
+    #         with open(osp.join(save_pred_path, f"{self.args.model_name}_{self.args.data_choice}_{self.args.data_split}_{self.args.data_rate}_ep{self.args.il_start}_pred.txt"), "w") as f:
+    #             wr = csv.writer(f, dialect='excel')
+    #             wr.writerows(to_write)
+    #         if w_normalized is not None:
+    #             with open(osp.join(save_pred_path, f"{self.args.model_name}_{self.args.data_choice}_{self.args.data_split}_{self.args.data_rate}_ep{self.args.il_start}_wight.json"), "w") as fp:
+    #                 json.dump(w_normalized.cpu().tolist(), fp)
+    #         if weight_norm is not None:
+    #             wight_dic = {"all": weight_norm.cpu(), "left": weight_norm[test_left].cpu(), "right": weight_norm[test_right].cpu()}
+    #             with open(osp.join(save_pred_path, f"{self.args.model_name}_{self.args.data_choice}_{self.args.data_split}_{self.args.data_rate}_ep{self.args.il_start}_wight_dic.pkl"), "wb") as fp:
+    #                 pickle.dump(wight_dic, fp)
+
+    #     for idx in range(test_right.shape[0]):
+    #         _, indices = torch.sort(distance[:, idx], descending=False)
+    #         rank = (indices == idx).nonzero(as_tuple=False).squeeze().item()
+    #         mean_r2l += (rank + 1)
+    #         mrr_r2l += 1.0 / (rank + 1)
+    #         for i in range(len(top_k)):
+    #             if rank < top_k[i]:
+    #                 acc_r2l[i] += 1
+    #     mean_l2r /= test_left.size(0)
+    #     mean_r2l /= test_right.size(0)
+    #     mrr_l2r /= test_left.size(0)
+    #     mrr_r2l /= test_right.size(0)
+    #     for i in range(len(top_k)):
+    #         acc_l2r[i] = round(acc_l2r[i] / test_left.size(0), 4)
+    #         acc_r2l[i] = round(acc_r2l[i] / test_right.size(0), 4)
+    #     gc.collect()
+    #     if not self.args.only_test:
+    #         Loss_out = f", Loss = {self.loss_item:.4f}"
+    #     else:
+    #         Loss_out = ""
+    #         self.epoch = "Test"
+    #         self.early_stop_count = 1
+
+    #     if self.rank == 0:
+    #         self.logger.info(f"Ep {self.epoch} | l2r: acc of top {top_k} = {acc_l2r}, mr = {mean_l2r:.3f}, mrr = {mrr_l2r:.3f}{Loss_out}")
+    #         self.logger.info(f"Ep {self.epoch} | r2l: acc of top {top_k} = {acc_r2l}, mr = {mean_r2l:.3f}, mrr = {mrr_r2l:.3f}{Loss_out}")
+    #         self.early_stop_count -= 1
+    #         # ====== 新增：将评估指标写入 TensorBoard ======
+    #         if hasattr(self, 'writer') and self.writer is not None and self.epoch != "Test":
+    #             self.writer.add_scalar('eval/Hits_at_1', acc_l2r[0], self.epoch)
+    #             self.writer.add_scalar('eval/Hits_at_10', acc_l2r[1], self.epoch)
+    #             self.writer.add_scalar('eval/Hits_at_50', acc_l2r[2], self.epoch)
+    #             self.writer.add_scalar('eval/MRR', mrr_l2r, self.epoch)
+    #             self.writer.add_scalar('eval/MR', mean_l2r, self.epoch)
+    #         # =============================================
+    #     if not self.args.only_test and mrr_l2r > max(self.loss_log.acc) and not last_epoch:
+    #         self.logger.info(f"Best model update in Ep {self.epoch}: MRR from [{max(self.loss_log.acc)}] --> [{mrr_l2r}] ... ")
+    #         self.loss_log.update_acc(mrr_l2r)
+    #         self.early_stop_count = self.early_stop_init
+    #         self.best_model_wts = copy.deepcopy(self.model.state_dict())
 
     def _load_model(self, model, model_name=None):
         if model_name is None:

@@ -29,6 +29,12 @@ bash run_meaformer.sh 3 FBDB15K norm 0.2 0 > test.out 2>&1 &
 
 
 nohup bash run_EVA.sh 3 FBDB15K norm 0.2 > test_EVA.out 2>&1 &
+
+bash run_meaformer.sh 1 FBDB15K norm 0.2 0 0 0 0 0 > test000_new.log 2>&1 &
+
+bash run_meaformer_copy.sh 1 FBDB15K norm 0.2 0 0 0 0 0 > test_mod1.log 2>&1 &
+
+
 ======================================
 nohup bash run_PLM.sh > nohup_PLM.out 2>&1 &
 
