@@ -993,10 +993,31 @@ if __name__ == '__main__':
         logger.info("------------------------------------------------------------")
         
         # 2. 消融模块状态检查
-        logger.info("  [进阶消融模块状态]")
-        logger.info(f"  S型样本调度 (Sch)     : {'🟢 开启' if getattr(cfgs, 'use_sample_schedule', 0) else '🔴 关闭'}")
-        logger.info(f"  因果偏置 (Causal)     : {'🟢 开启' if getattr(cfgs, 'use_causal_bias', 0) else '🔴 关闭'}")
-        logger.info(f"  反事实防塌陷 (CSC)    : {'🟢 开启' if getattr(cfgs, 'use_csc', 0) else '🔴 关闭'}")
+        logger.info(f"  [进阶消融模块状态]")
+
+        # 模块一：样本调度
+        sch_on = getattr(cfgs, 'use_sample_schedule', 0) == 1
+        logger.info(f"  S型样本调度 (Sch)     : {'🟢 开启' if sch_on else '🔴 关闭'}")
+        if sch_on:
+            logger.info(f"    ├─ k (调度速度)    : {getattr(cfgs, 'k', 'N/A')}")
+            logger.info(f"    └─ lambda_val     : {getattr(cfgs, 'lambda_val', 'N/A')}")
+
+        # 模块二：因果偏置（推理时）
+        causal_on = getattr(cfgs, 'use_causal_bias', 0) == 1
+        logger.info(f"  因果偏置 (Causal)     : {'🟢 开启 (推理时融合)' if causal_on else '🔴 关闭'}")
+        if causal_on:
+            logger.info(f"    ├─ causal_lambda  : {getattr(cfgs, 'causal_lambda', 'N/A')}  (推理时距离融合强度)")
+            logger.info(f"    ├─ causal_gamma   : {getattr(cfgs, 'causal_gamma', 'N/A')}  (D_j 滑动平均因子)")
+            logger.info(f"    ├─ causal_beta    : {getattr(cfgs, 'causal_beta', 'N/A')}  (C_j 历史衰减因子)")
+            logger.info(f"    └─ causal_eval_k  : {getattr(cfgs, 'causal_eval_k', 'N/A')}  (C_j 评估间隔 epoch)")
+
+        # 模块三：反事实一致性（推理时）
+        csc_on = getattr(cfgs, 'use_csc', 0) == 1
+        logger.info(f"  反事实防塌陷 (CSC)    : {'🟢 开启 (推理时融合)' if csc_on else '🔴 关闭'}")
+        if csc_on:
+            logger.info(f"    └─ csc_lambda_0   : {getattr(cfgs, 'csc_lambda_0', 'N/A')}  (反事实距离融合强度)")
+
+        logger.info("------------------------------------------------------------")
         logger.info("============================================================")
         # ====================================================================
 

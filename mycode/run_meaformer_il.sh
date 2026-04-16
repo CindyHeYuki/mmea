@@ -56,6 +56,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --plm_embed_name 0 \
             --plm_embed_rel 0 \
             --plm_embed_attr 0 \
+            --il \
+            --il_start 500 \
+            --semi_learn_step 10 \
 
             #--enable_sota \
             
