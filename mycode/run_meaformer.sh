@@ -50,6 +50,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --csc_lambda_0 0.2 \
             --csc_gamma 0.5 \
             --use_plm 0 \
+            --use_plm 0 \
             --plm_name '/data0/hwx/mmea_copy/models/bert-base-multilingual-cased' \
             --freeze_plm 1 \
             --plm_max_len 16 \
