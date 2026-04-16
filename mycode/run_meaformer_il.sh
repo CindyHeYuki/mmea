@@ -44,19 +44,21 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --use_sample_schedule 1 \
             --k 6 \
             --use_causal_bias 1 \
-            --causal_lambda 0.4 \
+            --causal_lambda 0.1 \
             --causal_eval_k 10 \
             --use_csc 1 \
-            --csc_lambda_0 0.2 \
+            --csc_lambda_0 0.1 \
             --csc_gamma 0.5 \
-            --use_plm 0 \
+            --use_plm $6 \
             --plm_name '/data0/hwx/mmea_copy/models/bert-base-multilingual-cased' \
             --freeze_plm 1 \
             --plm_max_len 16 \
-            --plm_embed_name 0 \
-            --plm_embed_rel 0 \
-            --plm_embed_attr 0 \
-            --do_alpha_sweep 0 \
+            --plm_embed_name $7 \
+            --plm_embed_rel $8 \
+            --plm_embed_attr $9 \
+            --il \
+            --il_start 500 \
+            --semi_learn_step 10 \
 
             #--enable_sota \
             

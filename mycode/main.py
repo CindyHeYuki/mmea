@@ -265,6 +265,14 @@ class Runner:
             self.logger.info("load from the best model before final testing ... ")
             self.model.load_state_dict(self.best_model_wts)
         self.test(save_name=f"{name}_test_ep{self.args.epoch}")
+        # ====== 新增：训练结束后触发 α 扫描 ======
+        if getattr(self.args, 'do_alpha_sweep', 0) == 1:
+            self.logger.info("\n\n🔍 训练结束，开始 α 扫描...")
+            test_left = self.eval_left
+            test_right = self.eval_right
+            self.model.eval()
+            self.alpha_sweep(test_left, test_right)
+        # ========================================
 
         if self.rank == 0:
             self.logger.info(f"min loss {self.loss_log.get_min_loss()}")
@@ -481,6 +489,75 @@ class Runner:
         test_right = self.eval_right
         self.model.eval()
         self._test(test_left, test_right, last_epoch=last_epoch, save_name=save_name)
+    
+    
+    def alpha_sweep(self, test_left, test_right):
+        """
+        α 扫描：用不同的 causal_alpha 和 csc_alpha 组合评估，找最优组合
+        """
+        if self.rank != 0:
+            return
+        
+        self.logger.info("=" * 80)
+        self.logger.info("🔍 开始 α 扫描 (Alpha Sweep)")
+        self.logger.info("=" * 80)
+        
+        # causal_alphas = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3]
+        # csc_alphas = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25]
+        # 探索更高 causal_α
+        causal_alphas = [0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.7, 0.8]
+        csc_alphas = [0.0, 0.05, 0.1, 0.15, 0.2]
+        
+        results = []
+        
+        total = len(causal_alphas) * len(csc_alphas)
+        counter = 0
+        for c_alpha in causal_alphas:
+            for s_alpha in csc_alphas:
+                counter += 1
+                self.logger.info(f"\n--- [{counter}/{total}] causal_α={c_alpha}, csc_α={s_alpha} ---")
+                metrics = self._test(test_left, test_right, last_epoch=False, save_name="",
+                                    override_causal_alpha=c_alpha, override_csc_alpha=s_alpha)
+                
+                if metrics is not None:
+                    results.append({
+                        'causal_alpha': c_alpha,
+                        'csc_alpha': s_alpha,
+                        'hits1': metrics['hits1_l2r'],
+                        'hits10': metrics['hits10_l2r'],
+                        'mrr': metrics['mrr_l2r'],
+                    })
+        
+        # 按 Hits@1 排序
+        results_sorted = sorted(results, key=lambda x: x['hits1'], reverse=True)
+        
+        # 输出排行榜
+        self.logger.info("\n" + "=" * 80)
+        self.logger.info("🏆 α 扫描结果排行榜 (按 Hits@1 排序)")
+        self.logger.info("=" * 80)
+        self.logger.info(f"{'排名':<6}{'causal_α':<12}{'csc_α':<10}{'Hits@1':<10}{'Hits@10':<10}{'MRR':<10}")
+        self.logger.info("-" * 80)
+        for i, r in enumerate(results_sorted[:15]):  # 只展示 top 15
+            marker = "⭐" if i == 0 else "  "
+            self.logger.info(f"{marker} {i+1:<4}{r['causal_alpha']:<12}{r['csc_alpha']:<10}"
+                            f"{r['hits1']:<10.4f}{r['hits10']:<10.4f}{r['mrr']:<10.4f}")
+        self.logger.info("=" * 80)
+        
+        # 把最好的组合显眼地打印
+        best = results_sorted[0]
+        self.logger.info(f"\n🎯 最优组合: causal_α={best['causal_alpha']}, csc_α={best['csc_alpha']}")
+        self.logger.info(f"   Hits@1={best['hits1']:.4f}, Hits@10={best['hits10']:.4f}, MRR={best['mrr']:.4f}")
+        
+        # 也保存到文件
+        import json
+        sweep_save_path = osp.join(self.args.data_path, 'alpha_sweep_results.json')
+        # 把 numpy 类型转成 python 原生类型
+        results_serializable = []
+        for r in results_sorted:
+            results_serializable.append({k: float(v) for k, v in r.items()})
+        with open(sweep_save_path, 'w') as f:
+            json.dump(results_serializable, f, indent=2)
+        self.logger.info(f"💾 完整结果已保存到: {sweep_save_path}")
 
 
     def evaluate_Cj(self):
@@ -537,8 +614,8 @@ class Runner:
 
 
 
-    
-    def _test(self, test_left, test_right, last_epoch=False, save_name="", loss=None):
+    def _test(self, test_left, test_right, last_epoch=False, save_name="", loss=None,
+          override_causal_alpha=None, override_csc_alpha=None):
         with torch.no_grad():
             w_normalized = None
             if self.args.model_name in ["MEAformer"]:
@@ -635,7 +712,7 @@ class Runner:
                 # 加权融合单模态距离，作为"因果置信距离"
                 causal_distance = sum(w * d for w, d in zip(modal_weights, modal_distances))
                 # 与 joint 距离融合
-                causal_alpha = getattr(self.args, 'causal_lambda', 0.1)
+                causal_alpha = override_causal_alpha if override_causal_alpha is not None else getattr(self.args, 'causal_lambda', 0.1)
                 distance = (1 - causal_alpha) * distance + causal_alpha * causal_distance
                 self.logger.info(f"[Module 2] Causal fusion applied: alpha={causal_alpha}, "
                                 f"used {len(modal_distances)} modalities")
@@ -656,7 +733,7 @@ class Runner:
                 cf_distance = pairwise_distances(cf_joint[test_left], cf_joint[test_right])
                 
                 # 融合：事实距离为主，反事实距离做辅助验证
-                csc_alpha = getattr(self.args, 'csc_lambda_0', 0.1)
+                csc_alpha = override_csc_alpha if override_csc_alpha is not None else getattr(self.args, 'csc_lambda_0', 0.1)
                 distance = (1 - csc_alpha) * distance + csc_alpha * cf_distance
                 self.logger.info(f"[Module 3] Counterfactual fusion applied: alpha={csc_alpha}")
         # ====================================================================
@@ -742,106 +819,19 @@ class Runner:
             self.loss_log.update_acc(mrr_l2r)
             self.early_stop_count = self.early_stop_init
             self.best_model_wts = copy.deepcopy(self.model.state_dict())
+        # 返回评估指标，方便外部使用
+        return {
+            'hits1_l2r': acc_l2r[0],
+            'hits10_l2r': acc_l2r[1],
+            'hits50_l2r': acc_l2r[2],
+            'mrr_l2r': mrr_l2r,
+            'mr_l2r': mean_l2r,
+            'hits1_r2l': acc_r2l[0],
+            'hits10_r2l': acc_r2l[1],
+            'mrr_r2l': mrr_r2l,
+        }
 
 
-    # def _test(self, test_left, test_right, last_epoch=False, save_name="", loss=None):
-    #     with torch.no_grad():
-    #         w_normalized = None
-    #         if self.args.model_name in ["MEAformer"]:
-    #             final_emb, weight_norm = self.model.joint_emb_generat()
-    #         else:
-    #             final_emb = self.model.joint_emb_generat()
-    #             weight_norm = None
-    #         final_emb = F.normalize(final_emb)
-
-    #     # pdb.set_trace()
-    #     top_k = [1, 10, 50]
-    #     acc_l2r = np.zeros((len(top_k)), dtype=np.float32)
-    #     acc_r2l = np.zeros((len(top_k)), dtype=np.float32)
-    #     test_total, test_loss, mean_l2r, mean_r2l, mrr_l2r, mrr_r2l = 0, 0., 0., 0., 0., 0.
-    #     if self.args.distance == 2:
-    #         distance = pairwise_distances(final_emb[test_left], final_emb[test_right])
-    #     elif self.args.distance == 1:
-    #         distance = torch.FloatTensor(scipy.spatial.distance.cdist(
-    #             final_emb[test_left].cpu().data.numpy(),
-    #             final_emb[test_right].cpu().data.numpy(), metric="cityblock"))
-    #     if self.args.csls is True:
-    #         distance = 1 - csls_sim(1 - distance, self.args.csls_k)
-
-    #     if last_epoch:
-    #         to_write = []
-    #         test_left_np = test_left.cpu().numpy()
-    #         test_right_np = test_right.cpu().numpy()
-    #         to_write.append(["idx", "rank", "query_id", "gt_id", "ret1", "ret2", "ret3", "v1", "v2", "v3"])
-    #     for idx in range(test_left.shape[0]):
-    #         values, indices = torch.sort(distance[idx, :], descending=False)
-    #         rank = (indices == idx).nonzero(as_tuple=False).squeeze().item()
-    #         mean_l2r += (rank + 1)
-    #         mrr_l2r += 1.0 / (rank + 1)
-    #         for i in range(len(top_k)):
-    #             if rank < top_k[i]:
-    #                 acc_l2r[i] += 1
-    #         if last_epoch:
-    #             indices = indices.cpu().numpy()
-    #             to_write.append([idx, rank, test_left_np[idx], test_right_np[idx], test_right_np[indices[0]], test_right_np[indices[1]],
-    #                              test_right_np[indices[2]], round(values[0].item(), 4), round(values[1].item(), 4), round(values[2].item(), 4)])
-    #     if last_epoch:
-    #         import csv
-    #         if save_name == "":
-    #             save_name = self.args.model_name
-    #         save_pred_path = osp.join(self.args.data_path, self.args.model_name, f"{save_name}_pred")
-    #         os.makedirs(save_pred_path, exist_ok=True)
-    #         with open(osp.join(save_pred_path, f"{self.args.model_name}_{self.args.data_choice}_{self.args.data_split}_{self.args.data_rate}_ep{self.args.il_start}_pred.txt"), "w") as f:
-    #             wr = csv.writer(f, dialect='excel')
-    #             wr.writerows(to_write)
-    #         if w_normalized is not None:
-    #             with open(osp.join(save_pred_path, f"{self.args.model_name}_{self.args.data_choice}_{self.args.data_split}_{self.args.data_rate}_ep{self.args.il_start}_wight.json"), "w") as fp:
-    #                 json.dump(w_normalized.cpu().tolist(), fp)
-    #         if weight_norm is not None:
-    #             wight_dic = {"all": weight_norm.cpu(), "left": weight_norm[test_left].cpu(), "right": weight_norm[test_right].cpu()}
-    #             with open(osp.join(save_pred_path, f"{self.args.model_name}_{self.args.data_choice}_{self.args.data_split}_{self.args.data_rate}_ep{self.args.il_start}_wight_dic.pkl"), "wb") as fp:
-    #                 pickle.dump(wight_dic, fp)
-
-    #     for idx in range(test_right.shape[0]):
-    #         _, indices = torch.sort(distance[:, idx], descending=False)
-    #         rank = (indices == idx).nonzero(as_tuple=False).squeeze().item()
-    #         mean_r2l += (rank + 1)
-    #         mrr_r2l += 1.0 / (rank + 1)
-    #         for i in range(len(top_k)):
-    #             if rank < top_k[i]:
-    #                 acc_r2l[i] += 1
-    #     mean_l2r /= test_left.size(0)
-    #     mean_r2l /= test_right.size(0)
-    #     mrr_l2r /= test_left.size(0)
-    #     mrr_r2l /= test_right.size(0)
-    #     for i in range(len(top_k)):
-    #         acc_l2r[i] = round(acc_l2r[i] / test_left.size(0), 4)
-    #         acc_r2l[i] = round(acc_r2l[i] / test_right.size(0), 4)
-    #     gc.collect()
-    #     if not self.args.only_test:
-    #         Loss_out = f", Loss = {self.loss_item:.4f}"
-    #     else:
-    #         Loss_out = ""
-    #         self.epoch = "Test"
-    #         self.early_stop_count = 1
-
-    #     if self.rank == 0:
-    #         self.logger.info(f"Ep {self.epoch} | l2r: acc of top {top_k} = {acc_l2r}, mr = {mean_l2r:.3f}, mrr = {mrr_l2r:.3f}{Loss_out}")
-    #         self.logger.info(f"Ep {self.epoch} | r2l: acc of top {top_k} = {acc_r2l}, mr = {mean_r2l:.3f}, mrr = {mrr_r2l:.3f}{Loss_out}")
-    #         self.early_stop_count -= 1
-    #         # ====== 新增：将评估指标写入 TensorBoard ======
-    #         if hasattr(self, 'writer') and self.writer is not None and self.epoch != "Test":
-    #             self.writer.add_scalar('eval/Hits_at_1', acc_l2r[0], self.epoch)
-    #             self.writer.add_scalar('eval/Hits_at_10', acc_l2r[1], self.epoch)
-    #             self.writer.add_scalar('eval/Hits_at_50', acc_l2r[2], self.epoch)
-    #             self.writer.add_scalar('eval/MRR', mrr_l2r, self.epoch)
-    #             self.writer.add_scalar('eval/MR', mean_l2r, self.epoch)
-    #         # =============================================
-    #     if not self.args.only_test and mrr_l2r > max(self.loss_log.acc) and not last_epoch:
-    #         self.logger.info(f"Best model update in Ep {self.epoch}: MRR from [{max(self.loss_log.acc)}] --> [{mrr_l2r}] ... ")
-    #         self.loss_log.update_acc(mrr_l2r)
-    #         self.early_stop_count = self.early_stop_init
-    #         self.best_model_wts = copy.deepcopy(self.model.state_dict())
 
     def _load_model(self, model, model_name=None):
         if model_name is None:
@@ -993,12 +983,31 @@ if __name__ == '__main__':
         logger.info("------------------------------------------------------------")
         
         # 2. 消融模块状态检查
-        logger.info("  [进阶消融模块状态]")
-        logger.info(f"  S型样本调度 (Sch)     : {'🟢 开启' if getattr(cfgs, 'use_sample_schedule', 0) else '🔴 关闭'}")
-        logger.info(f"  因果偏置 (Causal)     : {'🟢 开启' if getattr(cfgs, 'use_causal_bias', 0) else '🔴 关闭'}")
-        logger.info(f"  反事实防塌陷 (CSC)    : {'🟢 开启' if getattr(cfgs, 'use_csc', 0) else '🔴 关闭'}")
-        logger.info("============================================================")
-        # ====================================================================
+        logger.info(f"  [进阶消融模块状态]")
+
+        # 模块一：样本调度
+        sch_on = getattr(cfgs, 'use_sample_schedule', 0) == 1
+        logger.info(f"  S型样本调度 (Sch)     : {'🟢 开启' if sch_on else '🔴 关闭'}")
+        if sch_on:
+            logger.info(f"    ├─ k (调度速度)    : {getattr(cfgs, 'k', 'N/A')}")
+            logger.info(f"    └─ lambda_val     : {getattr(cfgs, 'lambda_val', 'N/A')}")
+
+        # 模块二：因果偏置（推理时）
+        causal_on = getattr(cfgs, 'use_causal_bias', 0) == 1
+        logger.info(f"  因果偏置 (Causal)     : {'🟢 开启 (推理时融合)' if causal_on else '🔴 关闭'}")
+        if causal_on:
+            logger.info(f"    ├─ causal_lambda  : {getattr(cfgs, 'causal_lambda', 'N/A')}  (推理时距离融合强度)")
+            logger.info(f"    ├─ causal_gamma   : {getattr(cfgs, 'causal_gamma', 'N/A')}  (D_j 滑动平均因子)")
+            logger.info(f"    ├─ causal_beta    : {getattr(cfgs, 'causal_beta', 'N/A')}  (C_j 历史衰减因子)")
+            logger.info(f"    └─ causal_eval_k  : {getattr(cfgs, 'causal_eval_k', 'N/A')}  (C_j 评估间隔 epoch)")
+
+        # 模块三：反事实一致性（推理时）
+        csc_on = getattr(cfgs, 'use_csc', 0) == 1
+        logger.info(f"  反事实防塌陷 (CSC)    : {'🟢 开启 (推理时融合)' if csc_on else '🔴 关闭'}")
+        if csc_on:
+            logger.info(f"    └─ csc_lambda_0   : {getattr(cfgs, 'csc_lambda_0', 'N/A')}  (反事实距离融合强度)")
+
+        logger.info("------------------------------------------------------------")
 
         
         cfgs.time_stamp = "{0:%Y-%m-%dT%H-%M-%S/}".format(datetime.now())

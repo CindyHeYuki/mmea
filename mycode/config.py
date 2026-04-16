@@ -63,6 +63,9 @@ class cfg():
         parser.add_argument("--csc_gamma", default=0.1, type=float, help="反事实对比的间隔 Margin")
         # =============================================
 
+        parser.add_argument("--do_alpha_sweep", default=0, type=int, choices=[0, 1],
+                    help="是否在最后一次评估时进行 α 扫描")
+
         # ====== 新增：预训练语言模型 (PLM) 模块参数 ======
         # ====== PLM 全能控制模块 ======
         parser.add_argument("--use_plm", default=1, type=int, choices=[0, 1], 
