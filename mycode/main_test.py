@@ -448,13 +448,9 @@ class Runner:
         self.logger.info("🔍 开始 α 扫描 (Alpha Sweep)")
         self.logger.info("=" * 80)
         
-        # 探索更高 causal_α
-        # causal_alphas = [0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.7, 0.8]
-        # csc_alphas = [0.0, 0.05, 0.1, 0.15, 0.2]
-        # 锁定已知的最优 causal/csc，集中扫描 neighbor_alpha
-        causal_alphas = [0.4]  # 锁定
-        csc_alphas = [0.2]     # 锁定
-        neighbor_alphas = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5]  # 重点扫这个
+        causal_alphas = [0.0, 0.05, 0.1,0.15, 0.2,0.25, 0.3, 0.35,0.4, 0.45,0.5,0.55, 0.6,0.65, 0.7]
+        csc_alphas = [ 0.0,0.05, 0.1,0.15, 0.2]
+        neighbor_alphas = [0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
         
         results = []
         total = len(causal_alphas) * len(csc_alphas) * len(neighbor_alphas)

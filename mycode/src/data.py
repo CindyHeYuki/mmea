@@ -271,18 +271,83 @@ def load_eva_data(logger, args):
         modal_consistency[i] = 1 - (sim_tv + sim_ts + sim_vs) / 3
 
 
-    # 计算样本难度 (ρ = λ·ρ_struct + (1-λ)·ρ_modal)
-    lambda_val = 0.7  # 可配置参数，默认为0.7
-    sample_difficulty = {}
-    for pair in train_ill:
-        e1, e2 = pair
-        deg_sum = ent_degree[e1] + ent_degree[e2]
-        rho_struct = 1 / np.log(2 + deg_sum)
-        rho_modal = (modal_consistency[e1] + modal_consistency[e2]) / 2
-        difficulty = lambda_val * rho_struct + (1 - lambda_val) * rho_modal
-        sample_difficulty[(e1, e2)] = difficulty
-    
-    logger.info(f"Calculated difficulty for {len(sample_difficulty)} training samples")
+    # ====== 新增：计算实体名称的独特性（频率倒数）======
+    logger.info("Computing entity name uniqueness for difficulty enhancement...")
+    from collections import Counter
+
+    # 1. 加载所有实体的名称
+    ent_name_str = ["unknown"] * ENT_NUM
+    for fn in ['ent_ids_1', 'ent_ids_2']:
+        fpath = os.path.join(file_dir, fn)
+        if os.path.exists(fpath):
+            with open(fpath, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 2:
+                        e_id = int(parts[0])
+                        e_uri = parts[1]
+                        # 从 URI 中提取最后一段作为名称
+                        name = e_uri.strip().split('/')[-1].split('#')[-1].strip('>').lower()
+                        # 简单清洗
+                        name = name.replace('_', ' ').replace('-', ' ').strip()
+                        if name and e_id < ENT_NUM:
+                            ent_name_str[e_id] = name
+
+    # 2. 统计每个名称在整个实体集合中出现的次数
+    name_counter = Counter(ent_name_str)
+
+    # 3. 计算每个实体的"名称独特性"
+    # 名称只出现 1 次 → 独特性高 → 名称非独特性低
+    # 名称出现 N 次 → 独特性低 → 名称非独特性高
+    ent_name_ambiguity = np.zeros(ENT_NUM, dtype=np.float32)
+    for i in range(ENT_NUM):
+        name = ent_name_str[i]
+        freq = name_counter.get(name, 1)
+        # 用 log 平滑：freq=1 → 0.0, freq=2 → 0.5, freq=4 → 0.79...
+        ent_name_ambiguity[i] = 1 - (1.0 / np.log2(2 + freq - 1))
+
+    logger.info(f"Name ambiguity stats: mean={ent_name_ambiguity.mean():.4f}, "
+                f"max={ent_name_ambiguity.max():.4f}, min={ent_name_ambiguity.min():.4f}")
+    # ====================================================
+
+
+    # ====== 难度计算（可选 2D 旧版 / 3D 新版）======
+    use_3d = getattr(args, 'use_3d_difficulty', 0) == 1
+
+    if use_3d:
+        # B3: 三维难度
+        lambda_1 = getattr(args, 'lambda_struct', 0.4)
+        lambda_2 = getattr(args, 'lambda_modal', 0.3)
+        lambda_3 = getattr(args, 'lambda_ambig', 0.3)
+        logger.info(f"[3D Difficulty] weights: struct={lambda_1}, modal={lambda_2}, ambig={lambda_3}")
+        
+        sample_difficulty = {}
+        for pair in train_ill:
+            e1, e2 = pair
+            deg_sum = ent_degree[e1] + ent_degree[e2]
+            rho_struct = 1 / np.log(2 + deg_sum)
+            rho_modal = (modal_consistency[e1] + modal_consistency[e2]) / 2
+            rho_ambig = (ent_name_ambiguity[e1] + ent_name_ambiguity[e2]) / 2
+            difficulty = lambda_1 * rho_struct + lambda_2 * rho_modal + lambda_3 * rho_ambig
+            sample_difficulty[(e1, e2)] = difficulty
+        
+        logger.info(f"Calculated 3D difficulty for {len(sample_difficulty)} training samples")
+    else:
+        # 旧版 2D 难度（原始公式）
+        lambda_val = 0.7
+        logger.info(f"[2D Difficulty] lambda_val={lambda_val}")
+        
+        sample_difficulty = {}
+        for pair in train_ill:
+            e1, e2 = pair
+            deg_sum = ent_degree[e1] + ent_degree[e2]
+            rho_struct = 1 / np.log(2 + deg_sum)
+            rho_modal = (modal_consistency[e1] + modal_consistency[e2]) / 2
+            difficulty = lambda_val * rho_struct + (1 - lambda_val) * rho_modal
+            sample_difficulty[(e1, e2)] = difficulty
+        
+        logger.info(f"Calculated 2D difficulty for {len(sample_difficulty)} training samples")
+    # ============================================
 
     #New1 end
 

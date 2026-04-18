@@ -41,6 +41,16 @@ class cfg():
                     help="结构稀疏度权重（0-1），用于计算样本难度：λ·ρ_struct + (1-λ)·ρ_modal")
         parser.add_argument("--use_sample_schedule", default=1, type=int, choices=[0, 1],
                     help="消融实验开关：是否启用样本调度 (1: 开启, 0: 关闭)")
+        # ====== B3: 三维难度度量参数 ======
+        parser.add_argument("--use_3d_difficulty", default=0, type=int, choices=[0, 1],
+                    help="是否启用三维难度度量（B3）。0=只用旧的二维 lambda_val 公式")
+        parser.add_argument("--lambda_struct", default=0.4, type=float,
+                            help="难度计算中结构稀疏度的权重 (建议 0.3-0.5)")
+        parser.add_argument("--lambda_modal", default=0.3, type=float,
+                            help="难度计算中模态不一致度的权重 (建议 0.2-0.4)")
+        parser.add_argument("--lambda_ambig", default=0.3, type=float,
+                            help="难度计算中名称非独特性的权重 (建议 0.2-0.4)")
+        # ===================================
         # ===================================================
 
         # ====== 新增：模块二 动态因果效应加权机制参数 ======
@@ -65,6 +75,14 @@ class cfg():
 
         parser.add_argument("--do_alpha_sweep", default=0, type=int, choices=[0, 1],
                     help="是否在最后一次评估时进行 α 扫描")
+        
+
+        # ====== B1: 邻居增强参数 ======
+        parser.add_argument("--use_neighbor", default=0, type=int, choices=[0, 1],
+                            help="是否启用邻居增强距离融合 (B1)")
+        parser.add_argument("--neighbor_alpha", default=0.2, type=float,
+                            help="邻居距离融合权重 (建议 0.1-0.3)")
+        # ===============================
 
         # ====== 新增：预训练语言模型 (PLM) 模块参数 ======
         # ====== PLM 全能控制模块 ======
