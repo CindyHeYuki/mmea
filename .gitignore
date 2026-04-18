@@ -6,3 +6,8 @@
 
 # 但不忽略 run_meaformer.sh
 !run_meaformer.sh
+!run_meaformer_il.sh
+!run_all_no_il.sh
+!run_all_il.sh
+!run_meaformer_sweep.sh
+!run_all_sweep_no_il.sh
