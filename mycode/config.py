@@ -218,7 +218,11 @@ class cfg():
     def update_train_configs(self):
         # add some constraint for parameters
         # e.g. cannot save and test at the same time
-        assert not (self.cfg.save_model and self.cfg.only_test)
+        # 原断言：assert not (self.cfg.save_model and self.cfg.only_test)
+        # 改为警告+自动修正，避免 only_test 模式下因误传参数导致崩溃
+        if self.cfg.save_model and self.cfg.only_test:
+            print("⚠️  [CONFIG] only_test 模式下 save_model 被自动关闭")
+            self.cfg.save_model = 0
 
         # update some dynamic variable
         self.cfg.data_root = self.data_root
@@ -253,28 +257,18 @@ class cfg():
             
             data_split_name = f"{self.cfg.data_rate}_"
 
-        # if self.cfg.data_choice in ["FBYG15K", "FBDB15K"]:
-        #     self.cfg.use_intermediate = 0
-        #     self.cfg.data_split = "norm"
-        #     self.cfg.inner_view_num = 4
-        #     # assert self.cfg.data_rate in [0.2, 0.5, 0.8]
-        #     self.cfg.w_name = False
-        #     self.cfg.w_char = False
-        #     self.cfg.use_surface = 0
-        #     data_split_name = f"{self.cfg.data_rate}_"
         else:
             data_split_name = f"{self.cfg.data_split}_"
             if self.cfg.w_name and self.cfg.w_char:
                 data_split_name = f"{data_split_name}with_surface_"
 
 
-        # ⬇️ 就是下面这一行在捣鬼，把它注释掉！
-        #self.cfg.exp_id = f"{self.cfg.model_name}_{self.cfg.data_choice}_{data_split_name}{self.cfg.exp_id}"
         self.cfg.data_path = osp.join(self.data_root, self.cfg.data_path)
         self.cfg.dump_path = osp.join(self.cfg.data_path, self.cfg.dump_path)
+        
         if self.cfg.only_test == 1:
-            self.save_model = 0
-            self.dist = 0
+            self.cfg.save_model = 0
+            self.cfg.dist = 0
 
         # --------- MSNEA -----------
         self.cfg.dim = self.cfg.attr_dim

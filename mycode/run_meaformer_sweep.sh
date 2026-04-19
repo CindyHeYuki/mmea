@@ -7,7 +7,7 @@ echo "脚本参数: $0 $@"
 echo "===== DEBUG INFO END ====="
 export TOKENIZERS_PARALLELISM=false
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 python  main_copy.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --gpu           $1    \
             --eval_epoch    1  \
             --only_test     0   \

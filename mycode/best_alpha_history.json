@@ -1,0 +1,32 @@
+{
+  "FBDB15K_norm_0.2_surface0": {
+    "best_alpha": {
+      "causal_alpha": 0.4,
+      "csc_alpha": 0.2,
+      "neighbor_alpha": 0.5
+    },
+    "best_metrics": {
+      "hits1": 0.5441,
+      "hits10": 0.7801,
+      "mrr": 0.6249
+    },
+    "checkpoint": "fbdb15k_20_base_",
+    "run_date": "2026-04-18",
+    "notes": "交接文档记录的历史最优，来自之前的 α 扫描"
+  },
+  "FBYG15K_norm_0.2_surface0": {
+    "best_alpha": {
+      "causal_alpha": 0.175,
+      "csc_alpha": 0.125,
+      "neighbor_alpha": 0.575
+    },
+    "best_metrics": {
+      "hits1": 0.4406999945640564,
+      "hits10": 0.6593000292778015,
+      "mrr": 0.5158678160315558
+    },
+    "checkpoint": "fbyg15k_20_base_",
+    "run_date": "2026-04-19 14:43:05",
+    "notes": "two-stage sweep, 60 coarse + 343 fine"
+  }
+}
