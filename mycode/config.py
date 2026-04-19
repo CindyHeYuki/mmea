@@ -18,7 +18,7 @@ class cfg():
         parser.add_argument('--gpu', default=0, type=int)
         parser.add_argument('--batch_size', default=128, type=int)
         parser.add_argument('--epoch', default=100, type=int)
-        parser.add_argument("--save_model", default=0, type=int, choices=[0, 1])
+        parser.add_argument("--save_model", default=1, type=int, choices=[0, 1])
         parser.add_argument("--only_test", default=0, type=int, choices=[0, 1])
 
         # torthlight
@@ -83,6 +83,14 @@ class cfg():
         parser.add_argument("--neighbor_alpha", default=0.2, type=float,
                             help="邻居距离融合权重 (建议 0.1-0.3)")
         # ===============================
+
+        # 👇 添加下面这行 👇 
+        # ====== 新增：单模态消融反事实实验 ======
+        parser.add_argument("--ablate_modal", default="none", type=str, 
+                            choices=["none", "img", "gph", "rel", "att", "name", "char", "uniform"],
+                            help="推理阶段单模态消融开关。none:正常运行, uniform:均匀融合, 或输入指定模态名进行消融")
+        # =================================================
+
 
         # ====== 新增：预训练语言模型 (PLM) 模块参数 ======
         # ====== PLM 全能控制模块 ======
