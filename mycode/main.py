@@ -518,7 +518,8 @@ class Runner:
             m = self._test(test_left, test_right, last_epoch=False, save_name="",
                           override_causal_alpha=hist_alpha['causal_alpha'],
                           override_csc_alpha=hist_alpha['csc_alpha'],
-                          override_neighbor_alpha=hist_alpha['neighbor_alpha'])
+                          override_neighbor_alpha=hist_alpha['neighbor_alpha'],
+                          override_bidir_lambda=hist_alpha.get('bidir_lambda', None))
             if m is not None:
                 hist_alpha_new_result = {
                     'causal_alpha': hist_alpha['causal_alpha'],
@@ -891,9 +892,9 @@ class Runner:
         self.logger.info(" --------------------- Test result --------------------- ")
         self._test(test_left, test_right, last_epoch=last_epoch, save_name=save_name)
 
-
     def _test(self, test_left, test_right, last_epoch=False, save_name="", loss=None,
-          override_causal_alpha=None, override_csc_alpha=None, override_neighbor_alpha=None):
+          override_causal_alpha=None, override_csc_alpha=None, override_neighbor_alpha=None,
+          override_bidir_lambda=None):
         with torch.no_grad():
             w_normalized = None
             if self.args.model_name in ["MEAformer"]:
@@ -1038,11 +1039,41 @@ class Runner:
         # ====================================================================
         
         if self.args.csls is True:
-            distance = 1 - csls_sim(1 - distance, self.args.csls_k)
+            csls_iter = getattr(self.args, 'csls_iter', 1)
+            for _ in range(csls_iter):
+                distance = 1 - csls_sim(1 - distance, self.args.csls_k)
         
-        if self.args.csls is True:
-            distance = 1 - csls_sim(1 - distance, self.args.csls_k)
-        
+        # ====================================================================
+        # ====== A1: 双向一致性过滤（Bidirectional Consistency Filter）======
+        # 思想：对每个候选对 (i, j)，检查 i 在 j 反向搜索中的排名
+        #       如果反向排名很靠后，说明该匹配只是单向巧合，给予惩罚
+        # ====================================================================
+        if getattr(self.args, 'use_bidirectional_consistency', 0) == 1:
+            bidir_lambda = getattr(self.args, 'bidir_lambda', 0.1)
+            
+            with torch.no_grad():
+                # distance.shape = [N1, N2]
+                # 对每列 j，计算每行 i 在该列升序中的排名
+                # backward_order[k, j] = 排在第 k 位的行索引
+                backward_order = distance.argsort(dim=0)
+                
+                # 把 order 反转为 rank：rank_backward[i, j] = i 在第 j 列升序中的排名
+                rank_backward = torch.empty_like(backward_order, dtype=torch.float)
+                rank_range = torch.arange(
+                    distance.shape[0], device=distance.device, dtype=torch.float
+                ).unsqueeze(1).expand(-1, distance.shape[1])
+                rank_backward.scatter_(0, backward_order, rank_range)
+                
+                # 用 log(1+rank) 做软化惩罚，避免个别大排名主导
+                # 正确匹配时反向排名应该=0（i 就是 j 的 top-1），penalty=log(1)=0
+                penalty = torch.log1p(rank_backward)
+                
+                distance = distance + bidir_lambda * penalty
+            
+            self.logger.info(f"[Bidirectional Consistency] applied: lambda={bidir_lambda}")
+        # ====================================================================
+
+
         # ... 后面不变 ...
         if last_epoch:
             to_write = []

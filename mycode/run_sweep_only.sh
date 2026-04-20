@@ -88,4 +88,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python main.py \
             --do_alpha_sweep 1 \
             --use_3d_difficulty 0 \
             --use_neighbor 1 \
-            --neighbor_alpha 0.5
+            --neighbor_alpha 0.5 \
+            --use_bidirectional_consistency 0 \
+            --bidir_lambda 0.05 \
+            --csls_iter 4

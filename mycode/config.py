@@ -84,6 +84,12 @@ class cfg():
                             help="邻居距离融合权重 (建议 0.1-0.3)")
         # ===============================
 
+        # ===== A1: 双向一致性过滤 =====
+        parser.add_argument("--use_bidirectional_consistency", default=0, type=int, choices=[0, 1],
+                            help="是否在推理时启用双向一致性过滤（A1）")
+        parser.add_argument("--bidir_lambda", default=0.1, type=float,
+                            help="双向一致性过滤的惩罚强度")
+
         # 👇 添加下面这行 👇 
         # ====== 新增：单模态消融反事实实验 ======
         parser.add_argument("--ablate_modal", default="none", type=str, 
@@ -146,6 +152,8 @@ class cfg():
         parser.add_argument("--distance", type=int, default=2, help="L1 distance or L2 distance. ('1', '2')", choices=[1, 2])
         parser.add_argument("--csls", action="store_true", default=False, help="use CSLS for inference")
         parser.add_argument("--csls_k", type=int, default=10, help="top k for csls")
+        parser.add_argument("--csls_iter", type=int, default=1, 
+                            help="CSLS 迭代次数。稀疏图（如 YAGO）建议设 2 做更强 hub 正则化。")
         parser.add_argument("--il", action="store_true", default=False, help="Iterative learning?")
         parser.add_argument("--semi_learn_step", type=int, default=10, help="If IL, what's the update step?")
         parser.add_argument("--il_start", type=int, default=500, help="If Il, when to start?")
