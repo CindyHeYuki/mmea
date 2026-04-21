@@ -75,6 +75,19 @@ class cfg():
 
         parser.add_argument("--do_alpha_sweep", default=0, type=int, choices=[0, 1],
                     help="是否在最后一次评估时进行 α 扫描")
+        parser.add_argument('--do_csls_iter_sweep', type=int, default=0,
+                    help='是否触发 csls_iter × α 联合扫描（外层 iter, 内层 α 两阶段）')
+        parser.add_argument('--do_csls_iter_sanity_check', type=int, default=0,
+                            help='验证 1：固定 α 只扫 csls_iter')
+        parser.add_argument('--csls_iter_sweep_list', type=int, nargs='+', default=None,
+                            help='csls_iter 扫描列表，如 --csls_iter_sweep_list 2 3 4 5 6 7 8 9 10')
+        
+        parser.add_argument('--sanity_causal_alpha', type=float, default=0.15,
+                    help='验证 1 专用：固定的 causal_alpha')
+        parser.add_argument('--sanity_csc_alpha', type=float, default=0.125,
+                            help='验证 1 专用：固定的 csc_alpha')
+        parser.add_argument('--sanity_neighbor_alpha', type=float, default=0.675,
+                            help='验证 1 专用：固定的 neighbor_alpha')
         
 
         # ====== B1: 邻居增强参数 ======

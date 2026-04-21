@@ -1,32 +1,152 @@
 {
   "FBDB15K_norm_0.2_surface0": {
     "best_alpha": {
-      "causal_alpha": 0.4,
-      "csc_alpha": 0.2,
-      "neighbor_alpha": 0.5
+      "causal_alpha": 0.225,
+      "csc_alpha": 0.225,
+      "neighbor_alpha": 0.65
     },
     "best_metrics": {
-      "hits1": 0.5441,
-      "hits10": 0.7801,
-      "mrr": 0.6249
+      "hits1": 0.5764999985694885,
+      "hits10": 0.7960000038146973,
+      "mrr": 0.651692987811714
     },
-    "checkpoint": "fbdb15k_20_base_",
-    "run_date": "2026-04-18",
-    "notes": "交接文档记录的历史最优，来自之前的 α 扫描"
+    "checkpoint": "fbdb15k_20_base__train_",
+    "run_date": "2026-04-21 19:07:31",
+    "notes": "two-stage sweep, 75 coarse + 294 fine"
   },
   "FBYG15K_norm_0.2_surface0": {
     "best_alpha": {
-      "causal_alpha": 0.175,
-      "csc_alpha": 0.15,
-      "neighbor_alpha": 0.675
+      "causal_alpha": 0.125,
+      "csc_alpha": 0.125,
+      "neighbor_alpha": 0.625
     },
     "best_metrics": {
-      "hits1": 0.4429999887943268,
-      "hits10": 0.6570000052452087,
-      "mrr": 0.516067074376406
+      "hits1": 0.4560000002384186,
+      "hits10": 0.6642000079154968,
+      "mrr": 0.5272510114073955
     },
     "checkpoint": "fbyg15k_20_base_",
-    "run_date": "2026-04-19 18:18:46",
-    "notes": "two-stage sweep, 48 coarse + 343 fine"
+    "run_date": "2026-04-20 11:41:58",
+    "notes": "two-stage sweep, 48 coarse + 245 fine"
+  },
+  "FBDB15K_norm_0.5_surface0": {
+    "best_alpha": {
+      "causal_alpha": 0.225,
+      "csc_alpha": 0.2,
+      "neighbor_alpha": 0.4
+    },
+    "best_metrics": {
+      "hits1": 0.7235999703407288,
+      "hits10": 0.880299985408783,
+      "mrr": 0.7803620385024872
+    },
+    "checkpoint": "fbdb15k_50_base__train_",
+    "run_date": "2026-04-21 16:54:41",
+    "notes": "two-stage sweep, 125 coarse + 343 fine"
+  },
+  "DBP15K_zh_en_0.3_surface1": {
+    "best_alpha": {
+      "causal_alpha": 0.325,
+      "csc_alpha": 0.025,
+      "neighbor_alpha": 0.525
+    },
+    "best_metrics": {
+      "hits1": 0.9571999907493591,
+      "hits10": 0.9951000213623047,
+      "mrr": 0.9717879212261744
+    },
+    "checkpoint": "",
+    "run_date": "2026-04-20 22:57:40",
+    "notes": "two-stage sweep, 150 coarse + 294 fine"
+  },
+  "DBP15K_ja_en_0.3_surface1": {
+    "best_alpha": {
+      "causal_alpha": 0.45,
+      "csc_alpha": 0.1,
+      "neighbor_alpha": 0.55
+    },
+    "best_metrics": {
+      "hits1": 0.9796000123023987,
+      "hits10": 0.9990000128746033,
+      "mrr": 0.987830972576073
+    },
+    "checkpoint": "",
+    "run_date": "2026-04-21 00:46:05",
+    "notes": "two-stage sweep, 150 coarse + 294 fine"
+  },
+  "DBP15K_fr_en_0.3_surface1": {
+    "best_alpha": {
+      "causal_alpha": 0.2,
+      "csc_alpha": 0.05,
+      "neighbor_alpha": 0.35
+    },
+    "best_metrics": {
+      "hits1": 0.9933000206947327,
+      "hits10": 1.0,
+      "mrr": 0.9961892668178383
+    },
+    "checkpoint": "",
+    "run_date": "2026-04-21 02:37:31",
+    "notes": "two-stage sweep, 150 coarse + 343 fine"
+  },
+  "DBP15K_zh_en_0.3_surface0": {
+    "best_alpha": {
+      "causal_alpha": 0.175,
+      "csc_alpha": 0.0,
+      "neighbor_alpha": 0.45
+    },
+    "best_metrics": {
+      "hits1": 0.8104000091552734,
+      "hits10": 0.9624999761581421,
+      "mrr": 0.8649869555630706
+    },
+    "checkpoint": "",
+    "run_date": "2026-04-21 04:16:36",
+    "notes": "two-stage sweep, 150 coarse + 196 fine"
+  },
+  "DBP15K_ja_en_0.3_surface0": {
+    "best_alpha": {
+      "causal_alpha": 0.0,
+      "csc_alpha": 0.125,
+      "neighbor_alpha": 0.475
+    },
+    "best_metrics": {
+      "hits1": 0.8064000010490417,
+      "hits10": 0.9684000015258789,
+      "mrr": 0.8653569242996002
+    },
+    "checkpoint": "",
+    "run_date": "2026-04-21 05:50:04",
+    "notes": "two-stage sweep, 150 coarse + 196 fine"
+  },
+  "DBP15K_fr_en_0.3_surface0": {
+    "best_alpha": {
+      "causal_alpha": 0.025,
+      "csc_alpha": 0.075,
+      "neighbor_alpha": 0.55
+    },
+    "best_metrics": {
+      "hits1": 0.8149999976158142,
+      "hits10": 0.9750999808311462,
+      "mrr": 0.8734690100775327
+    },
+    "checkpoint": "",
+    "run_date": "2026-04-21 07:25:50",
+    "notes": "two-stage sweep, 150 coarse + 196 fine"
+  },
+  "FBDB15K_norm_0.8_surface0": {
+    "best_alpha": {
+      "causal_alpha": 0.3,
+      "csc_alpha": 0.0,
+      "neighbor_alpha": 0.175
+    },
+    "best_metrics": {
+      "hits1": 0.8043000102043152,
+      "hits10": 0.9300000071525574,
+      "mrr": 0.8519262262132198
+    },
+    "checkpoint": "fbdb15k_80_base__train_",
+    "run_date": "2026-04-21 11:19:56",
+    "notes": "two-stage sweep, 150 coarse + 196 fine"
   }
 }

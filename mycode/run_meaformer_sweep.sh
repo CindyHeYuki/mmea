@@ -7,6 +7,9 @@ echo "脚本参数: $0 $@"
 echo "===== DEBUG INFO END ====="
 export TOKENIZERS_PARALLELISM=false
 
+#bash run_meaformer_sweep.sh <GPU> <DATASET> <SPLIT> <RATE> <USE_SURFACE> <CKPT_NAME>
+#nohup bash run_meaformer_sweep.sh 2 FBDB15K norm 0.2 0 fbdb15k_20_base_ > train_fbdb15k_20.log 2>&1 &
+
 CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
             --gpu           $1    \
             --eval_epoch    1  \
@@ -23,8 +26,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python  main.py \
 	        --csls          \
 	        --csls_k        3 \
 	        --random_seed   42 \
-            --exp_name      plm_$5_500-Norm \
-            --exp_id        fbyg15k_20_base \
+            --exp_name      ${2}_${4}_train \
+            --exp_id        ${6}_train \
+            --model_name_save ${6} \
             --workers       12 \
             --dist          0 \
             --accumulation_steps 1 \

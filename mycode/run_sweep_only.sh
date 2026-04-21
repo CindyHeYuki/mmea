@@ -25,6 +25,7 @@ DATA_SPLIT=${3:-norm}
 RATE=${4:-0.2}
 USE_SURFACE=${5:-0}
 CKPT=${6:-fbyg15k_20_base_}
+CLCS_ITER=${7:-2}
 
 echo "=========================================================="
 echo "🚀 [SWEEP ONLY] GPU=$GPU"
@@ -33,6 +34,7 @@ echo "🚀 [SWEEP ONLY] DATA_SPLIT=$DATA_SPLIT"
 echo "🚀 [SWEEP ONLY] RATE=$RATE"
 echo "🚀 [SWEEP ONLY] USE_SURFACE=$USE_SURFACE"
 echo "🚀 [SWEEP ONLY] CHECKPOINT=$CKPT"
+echo "🚀 [SWEEP ONLY] CLCS_ITER=$CLCS_ITER"
 echo "=========================================================="
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 python main.py \
@@ -91,4 +93,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python main.py \
             --neighbor_alpha 0.5 \
             --use_bidirectional_consistency 0 \
             --bidir_lambda 0.05 \
-            --csls_iter 4
+            --do_csls_iter_sweep 1 \
+            --csls_iter_sweep_list 2 3 4 5 6 7 8 9 10 \
+            --do_csls_iter_sanity_check 0 \
+            --sanity_causal_alpha 0.15 \
+            --sanity_csc_alpha 0.125 \
+            --sanity_neighbor_alpha 0.675 \
