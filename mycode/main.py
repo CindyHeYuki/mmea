@@ -1134,12 +1134,101 @@ class Runner:
         self.logger.info(" --------------------- Test result --------------------- ")
         self._test(test_left, test_right, last_epoch=last_epoch, save_name=save_name)
 
+
+    def _generate_ablated_final_emb(self, ablate_modal: str):
+        """
+        返回 (final_emb, weight_norm)。
+        当 ablate_modal ∈ {img, gph, rel, att, name, char} 时,
+        把该模态从融合中剔除,手动走一次融合拿到新的 joint_emb。
+        MformerFusion.forward 原生支持 None 自动剔除,所以这里只要把对应位置设 None 就行。
+        """
+        # 先拿全部 6 个独立模态
+        gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, _, _, _ = \
+            self.model.joint_emb_generat(only_joint=False)
+
+        # 融合层期望的模态顺序: [img, att, rel, gph, name, char]
+        # (见 MultiModalEncoder.forward 里 emb_list 的构造)
+        emb_map = {
+            'img': img_emb, 'att': att_emb, 'rel': rel_emb,
+            'gph': gph_emb, 'name': name_emb, 'char': char_emb,
+        }
+        if ablate_modal in emb_map:
+            emb_map[ablate_modal] = None
+
+        emb_list = [emb_map['img'], emb_map['att'], emb_map['rel'],
+                    emb_map['gph'], emb_map['name'], emb_map['char']]
+
+        # 直接调模型内部的 fusion 层(它原生支持 None 剔除)
+        fusion_layer = (self.model.module.multimodal_encoder.fusion
+                        if self.args.dist else
+                        self.model.multimodal_encoder.fusion)
+        joint_emb, _, weight_norm = fusion_layer(emb_list, causal_bias=None)
+
+        return joint_emb, weight_norm
+
+
+    def _generate_uniform_cf_emb(self):
+        """
+        用均匀权重构造反事实 joint_emb,不经过 MformerFusion 的 attention。
+        对应论文助手说的 Uniform 基线。
+        """
+        gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, _, _, _ = \
+            self.model.joint_emb_generat(only_joint=False)
+
+        modal_embs = [e for e in [img_emb, att_emb, rel_emb, gph_emb, name_emb, char_emb]
+                    if e is not None]
+        if len(modal_embs) < 2:
+            # 不可能的情况,防御性处理
+            return F.normalize(modal_embs[0]), None
+
+        # 均匀权重融合:每个模态 1/M
+        stacked = torch.stack([F.normalize(e, dim=-1) for e in modal_embs], dim=1)  # [N, M, dim]
+        M = stacked.shape[1]
+        cf_joint = stacked.mean(dim=1)  # [N, dim]  等价于 sum * 1/M
+        return cf_joint, None
+
     def _test(self, test_left, test_right, last_epoch=False, save_name="", loss=None,
           override_causal_alpha=None, override_csc_alpha=None, override_neighbor_alpha=None,
           override_bidir_lambda=None):
         with torch.no_grad():
             w_normalized = None
-            if self.args.model_name in ["MEAformer"]:
+            # =============== 单模态消融实验专用分支 ===============
+            ablate_modal = getattr(self.args, 'ablate_modal', "")
+            if ablate_modal:
+                if self.args.model_name != "MEAformer":
+                    raise NotImplementedError("ablate_modal only supported for MEAformer")
+
+                if ablate_modal == "uniform_cf":
+                    # Uniform baseline:用均匀权重反事实距离做最终距离
+                    final_emb, weight_norm = self._generate_uniform_cf_emb()
+                    self.logger.info(f"[Ablation] 🟢 Uniform (均匀权重 cf_joint) mode")
+                else:
+                    # w/o <modal>:把该模态从融合中剔除
+                    final_emb, weight_norm = self._generate_ablated_final_emb(ablate_modal)
+                    self.logger.info(f"[Ablation] 🟢 w/o {ablate_modal} (剔除模态后重融合)")
+
+                final_emb = F.normalize(final_emb)
+                gph_emb = img_emb = rel_emb = att_emb = name_emb = char_emb = None  # 明确不做下游融合
+
+                # 直接算 joint 距离,跳过所有推理时融合(因果/反事实/邻居)
+                if self.args.distance == 2:
+                    distance = pairwise_distances(final_emb[test_left], final_emb[test_right])
+                else:
+                    distance = torch.FloatTensor(scipy.spatial.distance.cdist(
+                        final_emb[test_left].cpu().data.numpy(),
+                        final_emb[test_right].cpu().data.numpy(), metric="cityblock"))
+
+                # CSLS 按命令行的 --csls 决定是否做(消融实验里我们会传 --csls 关掉)
+                if self.args.csls is True:
+                    distance = 1 - csls_sim(1 - distance, self.args.csls_k)
+
+                # 后面的 ranking 和指标计算直接复用下面的代码块 —— 跳到 top_k 那段
+                # 用 goto-like 的 flag 控制:
+                _skip_fusion = True
+            else:
+                _skip_fusion = False
+            # =====================================================
+            if not _skip_fusion and self.args.model_name in ["MEAformer"]:
                 final_emb, weight_norm = self.model.joint_emb_generat()
                 
                 # ====== 新增：获取各模态独立 embedding，供推理时融合使用 ======
@@ -1629,27 +1718,31 @@ if __name__ == '__main__':
     # =================================
     runner = Runner(cfgs, writer, logger, rank)
     if cfgs.only_test:
-        runner.test(last_epoch=False)
-        # ====== only_test 模式下支持三种扫描 ======
-        if rank == 0:
-            runner.model.eval()
-            if runner.test_set is not None:
-                test_left = runner.test_left
-                test_right = runner.test_right
-            else:
-                test_left = runner.eval_left
-                test_right = runner.eval_right
+        if getattr(cfgs, 'ablate_modal', ""):
+            # 消融实验:跳过所有扫描,直接 test
+            runner.test(last_epoch=False)
+        else:
+            runner.test(last_epoch=False)
+            # ====== only_test 模式下支持三种扫描 ======
+            if rank == 0:
+                runner.model.eval()
+                if runner.test_set is not None:
+                    test_left = runner.test_left
+                    test_right = runner.test_right
+                else:
+                    test_left = runner.eval_left
+                    test_right = runner.eval_right
 
-            # 优先级：csls_iter 联合扫描 > 验证 1 (sanity check) > 单次 α 扫描
-            if getattr(cfgs, 'do_csls_iter_sweep', 0) == 1:
-                runner.logger.info("\n\n🔍 [only_test] 触发 csls_iter × α 联合扫描...")
-                runner.csls_iter_and_alpha_sweep(test_left, test_right)
-            elif getattr(cfgs, 'do_csls_iter_sanity_check', 0) == 1:
-                runner.logger.info("\n\n🔍 [only_test] 触发验证 1 (sanity check) — 固定 α 扫 csls_iter...")
-                runner.csls_iter_sanity_check(test_left, test_right)
-            elif getattr(cfgs, 'do_alpha_sweep', 0) == 1:
-                runner.logger.info("\n\n🔍 [only_test] 触发 α 扫描...")
-                runner.alpha_sweep(test_left, test_right)
+                # 优先级：csls_iter 联合扫描 > 验证 1 (sanity check) > 单次 α 扫描
+                if getattr(cfgs, 'do_csls_iter_sweep', 0) == 1:
+                    runner.logger.info("\n\n🔍 [only_test] 触发 csls_iter × α 联合扫描...")
+                    runner.csls_iter_and_alpha_sweep(test_left, test_right)
+                elif getattr(cfgs, 'do_csls_iter_sanity_check', 0) == 1:
+                    runner.logger.info("\n\n🔍 [only_test] 触发验证 1 (sanity check) — 固定 α 扫 csls_iter...")
+                    runner.csls_iter_sanity_check(test_left, test_right)
+                elif getattr(cfgs, 'do_alpha_sweep', 0) == 1:
+                    runner.logger.info("\n\n🔍 [only_test] 触发 α 扫描...")
+                    runner.alpha_sweep(test_left, test_right)
     else:
         runner.run()
 

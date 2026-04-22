@@ -198,6 +198,34 @@ class Runner:
         self.early_stop_init = 1000
         self.early_stop_count = self.early_stop_init
         self.stage = 0
+        # ====== 新增：only_test 模式 → 跳过训练循环，直接加载测试 + α 扫描 ======
+        if self.args.only_test:
+            name = self._save_name_define()
+            self.logger.info("\n" + "=" * 60)
+            self.logger.info(f"🚀 [ONLY_TEST MODE] 跳过训练，使用已加载的模型")
+            self.logger.info(f"🚀 [ONLY_TEST MODE] model_name_save = '{self.args.model_name_save}'")
+            self.logger.info(f"🚀 [ONLY_TEST MODE] do_alpha_sweep  = {getattr(self.args, 'do_alpha_sweep', 0)}")
+            self.logger.info("=" * 60)
+
+            # 模型在 __init__ → model_choise() 里已经通过 _load_model 加载好 state_dict + C_j
+            self.model.eval()
+
+            # 1. 先跑一次标准推理，确认加载成功（数值应该和训练末尾的 best 接近）
+            self.test(save_name=f"{name}_only_test_baseline")
+
+            # 2. 如果开启了 α 扫描，直接扫描
+            # if getattr(self.args, 'do_csls_iter_sweep', 0) == 1:
+            #     self.logger.info("\n🔍 [ONLY_TEST MODE] 开始 iter 扫描...")
+            #     self.csls_iter_and_alpha_sweep(self.eval_left, self.eval_right)
+            # elif getattr(self.args, 'do_csls_iter_sanity_check', 0) == 1:
+            #     self.logger.info("\n🔍 [ONLY_TEST MODE] 开始 santiy check 扫描...")
+            #     self.csls_iter_sanity_check(self.eval_left, self.eval_right)
+            # elif getattr(self.args, 'do_alpha_sweep', 0) == 1:
+            #     self.logger.info("\n🔍 [ONLY_TEST MODE] 开始 α 扫描...")
+            #     self.alpha_sweep(self.eval_left, self.eval_right)
+            return
+        # =========================================================================
+
 
         with tqdm(total=self.args.epoch) as _tqdm:
             for i in range(self.args.epoch):
@@ -436,10 +464,249 @@ class Runner:
         self.model.eval()
         self._test(test_left, test_right, last_epoch=last_epoch, save_name=save_name)
     
+    def csls_iter_and_alpha_sweep(self, test_left, test_right):
+        """
+        外层 csls_iter 扫描 + 内层两阶段 α 扫描。
+        对 csls_iter_list 中的每个 k，独立做一次完整 alpha_sweep，
+        最后输出跨 iter 的对比总表。
+        """
+        if self.rank != 0:
+            return
+
+        import json
+        import os
+        from datetime import datetime
+
+        # 读取要扫的 iter 列表；未指定则回退到单值 self.args.csls_iter
+        iter_list = getattr(self.args, 'csls_iter_sweep_list', None)
+        if iter_list is None or len(iter_list) == 0:
+            iter_list = [getattr(self.args, 'csls_iter', 1)]
+        iter_list = sorted(set(int(k) for k in iter_list))
+
+        self.logger.info("#" * 100)
+        self.logger.info("🚀 开始 csls_iter × α 联合扫描")
+        self.logger.info(f"   csls_iter 列表: {iter_list}")
+        self.logger.info(f"   每个 iter 下独立做一次两阶段 α 扫描")
+        self.logger.info("#" * 100)
+
+        original_csls_iter = getattr(self.args, 'csls_iter', 1)
+        per_iter_best = {}  # {csls_iter: {'causal_alpha':..., 'csc_alpha':..., 'neighbor_alpha':..., 'hits1':..., ...}}
+
+        for idx, iter_k in enumerate(iter_list):
+            self.logger.info("\n" + "█" * 100)
+            self.logger.info(f"█ [{idx+1}/{len(iter_list)}] 扫描 csls_iter = {iter_k}")
+            self.logger.info("█" * 100)
+            # 覆盖当前 csls_iter，下游 _test() 会通过 getattr(self.args, 'csls_iter', 1) 自动读到新值
+            self.args.csls_iter = iter_k
+
+            # 调用原来的 alpha_sweep，但需要它返回 final_best
+            # （alpha_sweep 原本无返回值，这里依赖下面第 2 处改动让它返回 final_best）
+            final_best = self.alpha_sweep(test_left, test_right)
+
+            if final_best is None:
+                self.logger.info(f"⚠️  csls_iter={iter_k} 未返回结果，跳过")
+                continue
+
+            per_iter_best[iter_k] = final_best
+            self.logger.info(f"\n✅ csls_iter={iter_k} 完成: "
+                             f"causal={final_best['causal_alpha']}, "
+                             f"csc={final_best['csc_alpha']}, "
+                             f"neighbor={final_best['neighbor_alpha']} "
+                             f"→ Hits@1={final_best['hits1']:.4f}, "
+                             f"Hits@10={final_best['hits10']:.4f}, "
+                             f"MRR={final_best['mrr']:.4f}")
+
+        # 恢复原值
+        self.args.csls_iter = original_csls_iter
+
+        # ====== 输出跨 iter 对比总表 ======
+        self.logger.info("\n" + "=" * 110)
+        self.logger.info("🏆 csls_iter × α 联合扫描 —— 跨 iter 对比总表（每个 iter 下的最优 α 结果）")
+        self.logger.info("=" * 110)
+        self.logger.info(f"{'csls_iter':<12}{'causal_α':<12}{'csc_α':<10}{'neighbor_α':<14}"
+                         f"{'Hits@1':<10}{'Hits@10':<10}{'MRR':<10}")
+        self.logger.info("-" * 110)
+
+        # 按 Hits@1 排序找全局最优
+        sorted_by_h1 = sorted(per_iter_best.items(), key=lambda kv: kv[1]['hits1'], reverse=True)
+        global_best_iter = sorted_by_h1[0][0] if sorted_by_h1 else None
+
+        for iter_k in iter_list:
+            if iter_k not in per_iter_best:
+                continue
+            r = per_iter_best[iter_k]
+            marker = "⭐" if iter_k == global_best_iter else "  "
+            self.logger.info(f"{marker} {iter_k:<10}{r['causal_alpha']:<12}{r['csc_alpha']:<10}"
+                             f"{r['neighbor_alpha']:<14}{r['hits1']:<10.4f}"
+                             f"{r['hits10']:<10.4f}{r['mrr']:<10.4f}")
+        self.logger.info("=" * 110)
+
+        if global_best_iter is not None:
+            gb = per_iter_best[global_best_iter]
+            self.logger.info(f"\n🎖️  全局最优: csls_iter={global_best_iter}, "
+                             f"causal={gb['causal_alpha']}, csc={gb['csc_alpha']}, "
+                             f"neighbor={gb['neighbor_alpha']} "
+                             f"→ Hits@1={gb['hits1']:.4f}")
+
+        # ====== 单调性检查（诊断信息）======
+        self.logger.info("\n" + "-" * 80)
+        self.logger.info("📈 单调性诊断：H@1 随 csls_iter 的逐步增量")
+        self.logger.info("-" * 80)
+        iters_sorted = sorted(per_iter_best.keys())
+        for i in range(1, len(iters_sorted)):
+            prev_k, curr_k = iters_sorted[i-1], iters_sorted[i]
+            delta = per_iter_best[curr_k]['hits1'] - per_iter_best[prev_k]['hits1']
+            arrow = "↑" if delta > 0 else ("↓" if delta < 0 else "→")
+            self.logger.info(f"   iter {prev_k} → iter {curr_k}: ΔH@1 = {delta:+.4f} {arrow}")
+        self.logger.info("-" * 80)
+
+        # ====== 保存跨 iter 汇总 ======
+        save_dir = osp.join(self.args.data_path, 'sweep_results')
+        os.makedirs(save_dir, exist_ok=True)
+        exp_tag = f"{self.args.data_choice}_{self.args.data_split}_{self.args.data_rate}_surface{self.args.use_surface}"
+        summary_path = osp.join(save_dir, f'csls_iter_summary_{exp_tag}.json')
+        summary = {
+            'run_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'checkpoint': self.args.model_name_save,
+            'iter_list': iter_list,
+            'per_iter_best': {str(k): v for k, v in per_iter_best.items()},
+            'global_best_iter': global_best_iter,
+        }
+        with open(summary_path, 'w') as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        self.logger.info(f"\n💾 跨 iter 汇总已保存: {summary_path}")
+
+        return per_iter_best
+    
+
+    def csls_iter_sanity_check(self, test_left, test_right):
+        """
+        验证 1：固定 α，只扫 csls_iter。
+        用于判断"csls_iter 持续提升"是真效果还是 α 重搜索带来的过拟合。
+        
+        固定的 α 从 self.args.causal_alpha / csc_alpha / neighbor_alpha 读取，
+        扫描的 iter 列表从 self.args.csls_iter_sweep_list 读取。
+        """
+        if self.rank != 0:
+            return
+
+        import json
+        import os
+        from datetime import datetime
+
+        iter_list = getattr(self.args, 'csls_iter_sweep_list', None)
+        if iter_list is None or len(iter_list) == 0:
+            iter_list = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        iter_list = sorted(set(int(k) for k in iter_list))
+
+        fixed_causal = getattr(self.args, 'sanity_causal_alpha', 0.15)
+        fixed_csc = getattr(self.args, 'sanity_csc_alpha', 0.125)
+        fixed_neighbor = getattr(self.args, 'sanity_neighbor_alpha', 0.675)
+
+        self.logger.info("#" * 100)
+        self.logger.info("🧪 验证 1: 固定 α 扫 csls_iter (CSLS-iter Sanity Check)")
+        self.logger.info(f"   固定 α: causal={fixed_causal}, csc={fixed_csc}, neighbor={fixed_neighbor}")
+        self.logger.info(f"   csls_iter 列表: {iter_list}")
+        self.logger.info(f"   Checkpoint: {self.args.model_name_save}")
+        self.logger.info("   【用途】判断 csls_iter 单调上升是真效果还是 α 重搜索过拟合")
+        self.logger.info("#" * 100)
+
+        original_csls_iter = getattr(self.args, 'csls_iter', 1)
+        results = []
+
+        for idx, iter_k in enumerate(iter_list):
+            self.logger.info(f"\n--- [{idx+1}/{len(iter_list)}] 评估 csls_iter = {iter_k} (固定 α) ---")
+            self.args.csls_iter = iter_k
+
+            m = self._test(test_left, test_right, last_epoch=False, save_name="",
+                           override_causal_alpha=fixed_causal,
+                           override_csc_alpha=fixed_csc,
+                           override_neighbor_alpha=fixed_neighbor)
+
+            if m is None:
+                self.logger.info(f"   ⚠️ iter={iter_k} 测试返回 None，跳过")
+                continue
+
+            entry = {
+                'csls_iter': iter_k,
+                'causal_alpha': fixed_causal,
+                'csc_alpha': fixed_csc,
+                'neighbor_alpha': fixed_neighbor,
+                'hits1': float(m['hits1_l2r']),
+                'hits10': float(m['hits10_l2r']),
+                'mrr': float(m['mrr_l2r']),
+            }
+            results.append(entry)
+            self.logger.info(f"   → iter={iter_k}: H@1={entry['hits1']:.4f}, "
+                             f"H@10={entry['hits10']:.4f}, MRR={entry['mrr']:.4f}")
+
+        # 恢复
+        self.args.csls_iter = original_csls_iter
+
+        # ====== 输出结果表 ======
+        self.logger.info("\n" + "=" * 90)
+        self.logger.info("🧪 验证 1 结果 (固定 α, 扫 csls_iter)")
+        self.logger.info(f"   固定 α: causal={fixed_causal}, csc={fixed_csc}, neighbor={fixed_neighbor}")
+        self.logger.info("=" * 90)
+        self.logger.info(f"{'csls_iter':<12}{'Hits@1':<12}{'Hits@10':<12}{'MRR':<12}{'ΔH@1(vs prev)':<16}")
+        self.logger.info("-" * 90)
+
+        best_h1 = max((r['hits1'] for r in results), default=0.0)
+        for i, r in enumerate(results):
+            if i == 0:
+                delta_str = "—"
+            else:
+                delta = r['hits1'] - results[i-1]['hits1']
+                arrow = "↑" if delta > 0 else ("↓" if delta < 0 else "→")
+                delta_str = f"{delta:+.4f} {arrow}"
+            marker = "⭐" if abs(r['hits1'] - best_h1) < 1e-9 else "  "
+            self.logger.info(f"{marker} {r['csls_iter']:<10}{r['hits1']:<12.4f}"
+                             f"{r['hits10']:<12.4f}{r['mrr']:<12.4f}{delta_str:<16}")
+        self.logger.info("=" * 90)
+
+        # ====== 诊断性结论 ======
+        if len(results) >= 2:
+            h1_range = max(r['hits1'] for r in results) - min(r['hits1'] for r in results)
+            self.logger.info(f"\n📊 诊断指标:")
+            self.logger.info(f"   H@1 波动范围 (max - min): {h1_range:.4f}")
+            if h1_range < 0.003:
+                self.logger.info(f"   ⚠️  波动 < 0.003：固定 α 下 csls_iter 几乎不影响结果")
+                self.logger.info(f"      → 之前观察到的单调提升可能主要来自 α 重搜索过拟合")
+            elif h1_range < 0.008:
+                self.logger.info(f"   🟡 波动 0.003 ~ 0.008：csls_iter 有轻微但真实的效果")
+            else:
+                self.logger.info(f"   ✅ 波动 > 0.008：csls_iter 本身有显著效果")
+
+        # ====== 保存 ======
+        save_dir = osp.join(self.args.data_path, 'sweep_results')
+        os.makedirs(save_dir, exist_ok=True)
+        exp_tag = f"{self.args.data_choice}_{self.args.data_split}_{self.args.data_rate}_surface{self.args.use_surface}"
+        save_path = osp.join(save_dir, f'csls_iter_sanity_{exp_tag}.json')
+        with open(save_path, 'w') as f:
+            json.dump({
+                'run_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'checkpoint': self.args.model_name_save,
+                'fixed_alpha': {
+                    'causal_alpha': fixed_causal,
+                    'csc_alpha': fixed_csc,
+                    'neighbor_alpha': fixed_neighbor,
+                },
+                'results': results,
+            }, f, indent=2, ensure_ascii=False)
+        self.logger.info(f"\n💾 验证 1 结果已保存: {save_path}")
+
+        return results
+
     
     def alpha_sweep(self, test_left, test_right):
         """
-        升级版 α 扫描：扫描 + 可视化热力图 + 保存结果
+        两阶段 α 扫描：粗扫 → 细扫 → 历史对比
+        
+        流程:
+          1. 读取历史最优 α（如果有），以其为中心做大范围粗扫
+          2. 在粗扫 top-1 附近做局部细扫
+          3. 打印对比表：历史最优 vs 本次粗扫最优 vs 本次细扫最优
+          4. 如果本次最优更好，自动提示更新历史档案
         """
         if self.rank != 0:
             return
@@ -448,31 +715,248 @@ class Runner:
         import csv
         import os
 
+        # ====== 历史档案路径 & 当前配置 key ======
+        history_path = osp.join(osp.dirname(osp.abspath(__file__)), 'best_alpha_history.json')
+        config_key = f"{self.args.data_choice}_{self.args.data_split}_{self.args.data_rate}_surface{self.args.use_surface}"
+
         self.logger.info("=" * 80)
-        self.logger.info("🔍 开始 α 扫描 (Alpha Sweep) + 可视化")
+        self.logger.info("🔍 开始两阶段 α 扫描 (Two-Stage Alpha Sweep)")
+        self.logger.info(f"   当前配置: {config_key}")
+        self.logger.info(f"   Checkpoint: {self.args.model_name_save}")
+        self.logger.info(f"   当前 csls_iter: {getattr(self.args, 'csls_iter', 1)}")
         self.logger.info("=" * 80)
 
-        # ====== 搜索空间定义 ======
-        # causal_alphas = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5]
-        # csc_alphas = [0.0, 0.05, 0.1, 0.15, 0.2]
-        # neighbor_alphas = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+        # ====== 读取历史最优 ======
+        history = {}
+        if os.path.exists(history_path):
+            try:
+                with open(history_path, 'r') as f:
+                    history = json.load(f)
+                self.logger.info(f"📚 历史档案已加载: {history_path}")
+            except Exception as e:
+                self.logger.info(f"⚠️  历史档案加载失败（将视为空档案）: {e}")
+        else:
+            self.logger.info(f"📚 历史档案不存在，将从头开始")
 
-        #FBYG15k--20%seed
-        causal_alphas = [ 0.14, 0.16]
-        csc_alphas = [0.04, 0.06]
-        neighbor_alphas = [0.45, 0.55]
+        hist_record = history.get(config_key, None)
+        hist_alpha = hist_record['best_alpha'] if hist_record else None
 
+        if hist_alpha:
+            self.logger.info(f"🎯 历史最优 α: causal={hist_alpha['causal_alpha']}, "
+                            f"csc={hist_alpha['csc_alpha']}, neighbor={hist_alpha['neighbor_alpha']}")
+            self.logger.info(f"   历史最优 Hits@1: {hist_record['best_metrics']['hits1']:.4f}")
+        else:
+            self.logger.info(f"🎯 无历史最优记录，将使用默认粗扫范围")
 
+        # ====== 阶段 0：先评估历史最优 α（如果有）======
+        hist_alpha_new_result = None
+        if hist_alpha:
+            self.logger.info("\n" + "-" * 80)
+            self.logger.info("📊 [阶段 0] 评估历史最优 α 在当前模型上的表现...")
+            self.logger.info("-" * 80)
+            m = self._test(test_left, test_right, last_epoch=False, save_name="",
+                          override_causal_alpha=hist_alpha['causal_alpha'],
+                          override_csc_alpha=hist_alpha['csc_alpha'],
+                          override_neighbor_alpha=hist_alpha['neighbor_alpha'],
+                          override_bidir_lambda=hist_alpha.get('bidir_lambda', None))
+            if m is not None:
+                hist_alpha_new_result = {
+                    'causal_alpha': hist_alpha['causal_alpha'],
+                    'csc_alpha': hist_alpha['csc_alpha'],
+                    'neighbor_alpha': hist_alpha['neighbor_alpha'],
+                    'hits1': float(m['hits1_l2r']),
+                    'hits10': float(m['hits10_l2r']),
+                    'mrr': float(m['mrr_l2r']),
+                }
+                self.logger.info(f"   历史 α 本次 Hits@1={hist_alpha_new_result['hits1']:.4f}")
+
+        # ====== 阶段 1：粗扫 ======
+        self.logger.info("\n" + "=" * 80)
+        self.logger.info("📊 [阶段 1] 粗扫 (Coarse Grid Search)")
+        self.logger.info("=" * 80)
+
+        if hist_alpha:
+            # 以历史最优为中心的自适应范围（±0.2，步长 0.1）
+            def grid_around(center, radius=0.2, step=0.1, lo=0.0, hi=0.7):
+                grid = []
+                v = center - radius
+                while v <= center + radius + 1e-9:
+                    if v >= lo and v <= hi:
+                        grid.append(round(v, 3))
+                    v += step
+                return sorted(set(grid))
+            
+            coarse_causal = grid_around(hist_alpha['causal_alpha'])
+            coarse_csc = grid_around(hist_alpha['csc_alpha'])
+            coarse_neighbor = grid_around(hist_alpha['neighbor_alpha'])
+        else:
+            # 默认大范围粗扫
+            coarse_causal = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+            coarse_csc = [0.0, 0.05, 0.1, 0.15, 0.2]
+            coarse_neighbor = [0.0, 0.2, 0.4, 0.5, 0.6]
+
+        self.logger.info(f"   causal_α 网格 ({len(coarse_causal)} 点): {coarse_causal}")
+        self.logger.info(f"   csc_α 网格 ({len(coarse_csc)} 点): {coarse_csc}")
+        self.logger.info(f"   neighbor_α 网格 ({len(coarse_neighbor)} 点): {coarse_neighbor}")
+        self.logger.info(f"   总组合数: {len(coarse_causal) * len(coarse_csc) * len(coarse_neighbor)}")
+
+        coarse_results = self._run_sweep_grid(test_left, test_right,
+                                              coarse_causal, coarse_csc, coarse_neighbor,
+                                              tag="粗扫")
+
+        coarse_best = sorted(coarse_results, key=lambda x: x['hits1'], reverse=True)[0]
+        self.logger.info(f"\n🥇 粗扫最优: causal={coarse_best['causal_alpha']}, "
+                        f"csc={coarse_best['csc_alpha']}, neighbor={coarse_best['neighbor_alpha']} "
+                        f"→ Hits@1={coarse_best['hits1']:.4f}")
+
+        # ====== 阶段 2：细扫（粗扫最优点附近）======
+        self.logger.info("\n" + "=" * 80)
+        self.logger.info("📊 [阶段 2] 细扫 (Fine Grid Search around coarse best)")
+        self.logger.info("=" * 80)
+
+        def fine_grid_around(center, radius=0.075, step=0.025, lo=0.0, hi=0.7):
+            grid = []
+            v = center - radius
+            while v <= center + radius + 1e-9:
+                if v >= lo and v <= hi:
+                    grid.append(round(v, 4))
+                v += step
+            return sorted(set(grid))
+
+        fine_causal = fine_grid_around(coarse_best['causal_alpha'])
+        fine_csc = fine_grid_around(coarse_best['csc_alpha'])
+        fine_neighbor = fine_grid_around(coarse_best['neighbor_alpha'])
+
+        self.logger.info(f"   causal_α 网格 ({len(fine_causal)} 点): {fine_causal}")
+        self.logger.info(f"   csc_α 网格 ({len(fine_csc)} 点): {fine_csc}")
+        self.logger.info(f"   neighbor_α 网格 ({len(fine_neighbor)} 点): {fine_neighbor}")
+        self.logger.info(f"   总组合数: {len(fine_causal) * len(fine_csc) * len(fine_neighbor)}")
+
+        fine_results = self._run_sweep_grid(test_left, test_right,
+                                            fine_causal, fine_csc, fine_neighbor,
+                                            tag="细扫")
+
+        # ====== 合并所有结果 ======
+        all_results = coarse_results + fine_results
+        # 去重（同一 α 组合可能在粗扫和细扫都出现）
+        seen = set()
+        unique_results = []
+        for r in all_results:
+            key = (round(r['causal_alpha'], 4), round(r['csc_alpha'], 4), round(r['neighbor_alpha'], 4))
+            if key not in seen:
+                seen.add(key)
+                unique_results.append(r)
+        all_results = unique_results
+
+        results_sorted = sorted(all_results, key=lambda x: x['hits1'], reverse=True)
+        final_best = results_sorted[0]
+
+        # ====== 打印最终排行榜（Top 20）======
+        self.logger.info("\n" + "=" * 100)
+        self.logger.info("🏆 α 扫描最终排行榜 (Top 20, 按 Hits@1 排序)")
+        self.logger.info("=" * 100)
+        self.logger.info(f"{'排名':<6}{'causal_α':<12}{'csc_α':<10}{'neighbor_α':<14}{'Hits@1':<10}{'Hits@10':<10}{'MRR':<10}")
+        self.logger.info("-" * 100)
+        for i, r in enumerate(results_sorted[:20]):
+            marker = "⭐" if i == 0 else "  "
+            self.logger.info(f"{marker} {i+1:<4}{r['causal_alpha']:<12}{r['csc_alpha']:<10}"
+                            f"{r['neighbor_alpha']:<14}{r['hits1']:<10.4f}{r['hits10']:<10.4f}{r['mrr']:<10.4f}")
+        self.logger.info("=" * 100)
+
+        # ====== 关键对比表 ======
+        self.logger.info("\n" + "=" * 80)
+        self.logger.info("📋 关键对比表")
+        self.logger.info("=" * 80)
+        self.logger.info(f"{'来源':<28}{'causal_α':<12}{'csc_α':<10}{'neighbor_α':<14}{'Hits@1':<10}")
+        self.logger.info("-" * 80)
+
+        if hist_record:
+            hist_h1 = hist_record['best_metrics']['hits1']
+            self.logger.info(f"{'历史最优(档案记录)':<25}{hist_alpha['causal_alpha']:<12}"
+                            f"{hist_alpha['csc_alpha']:<10}{hist_alpha['neighbor_alpha']:<14}{hist_h1:<10.4f}")
+
+        if hist_alpha_new_result:
+            self.logger.info(f"{'历史α(本次模型表现)':<25}{hist_alpha_new_result['causal_alpha']:<12}"
+                            f"{hist_alpha_new_result['csc_alpha']:<10}{hist_alpha_new_result['neighbor_alpha']:<14}"
+                            f"{hist_alpha_new_result['hits1']:<10.4f}")
+
+        self.logger.info(f"{'本次粗扫最优':<28}{coarse_best['causal_alpha']:<12}"
+                        f"{coarse_best['csc_alpha']:<10}{coarse_best['neighbor_alpha']:<14}{coarse_best['hits1']:<10.4f}")
+        self.logger.info(f"{'本次最终最优(含细扫)':<25}{final_best['causal_alpha']:<12}"
+                        f"{final_best['csc_alpha']:<10}{final_best['neighbor_alpha']:<14}{final_best['hits1']:<10.4f}")
+        self.logger.info("=" * 80)
+
+        # ====== 自动更新历史档案（如果本次更优）======
+        should_update = False
+        if hist_record is None:
+            should_update = True
+            update_reason = "无历史记录"
+        elif final_best['hits1'] > hist_record['best_metrics']['hits1']:
+            should_update = True
+            update_reason = f"本次({final_best['hits1']:.4f}) > 历史({hist_record['best_metrics']['hits1']:.4f})"
+        else:
+            update_reason = f"本次({final_best['hits1']:.4f}) ≤ 历史({hist_record['best_metrics']['hits1']:.4f})，保持历史记录"
+
+        self.logger.info(f"\n🔄 历史档案更新决策: {'✅ 更新' if should_update else '❌ 不更新'}")
+        self.logger.info(f"   原因: {update_reason}")
+
+        if should_update:
+            from datetime import datetime
+            history[config_key] = {
+                "best_alpha": {
+                    "causal_alpha": final_best['causal_alpha'],
+                    "csc_alpha": final_best['csc_alpha'],
+                    "neighbor_alpha": final_best['neighbor_alpha'],
+                },
+                "best_metrics": {
+                    "hits1": final_best['hits1'],
+                    "hits10": final_best['hits10'],
+                    "mrr": final_best['mrr'],
+                },
+                "checkpoint": self.args.model_name_save,
+                "run_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "notes": f"two-stage sweep, {len(coarse_results)} coarse + {len(fine_results)} fine",
+            }
+            with open(history_path, 'w') as f:
+                json.dump(history, f, indent=2, ensure_ascii=False)
+            self.logger.info(f"   ✅ 已写入 {history_path}")
+
+        # ====== 保存本次完整结果 ======
+        save_dir = osp.join(self.args.data_path, 'sweep_results')
+        os.makedirs(save_dir, exist_ok=True)
+        exp_tag = f"{self.args.data_choice}_{self.args.data_split}_{self.args.data_rate}_surface{self.args.use_surface}"
+
+        json_path = osp.join(save_dir, f'sweep_{exp_tag}.json')
+        with open(json_path, 'w') as f:
+            json.dump(results_sorted, f, indent=2)
+
+        csv_path = osp.join(save_dir, f'sweep_{exp_tag}.csv')
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=['causal_alpha', 'csc_alpha', 'neighbor_alpha', 'hits1', 'hits10', 'mrr'])
+            writer.writeheader()
+            writer.writerows(results_sorted)
+
+        self.logger.info(f"\n💾 完整结果保存: {json_path}")
+        self.logger.info(f"💾 CSV 保存:       {csv_path}")
+
+        # ====== 生成热力图（沿用你之前的函数）======
+        self._plot_sweep_heatmaps(all_results, save_dir, exp_tag, final_best)
+
+        # 返回本次 α 扫描的最优结果（供外层 csls_iter 扫描汇总）
+        return final_best
+
+    def _run_sweep_grid(self, test_left, test_right, causal_grid, csc_grid, neighbor_grid, tag=""):
+        """在给定网格上跑扫描，返回结果列表"""
         results = []
-        total = len(causal_alphas) * len(csc_alphas) * len(neighbor_alphas)
+        total = len(causal_grid) * len(csc_grid) * len(neighbor_grid)
         counter = 0
 
-        for c_alpha in causal_alphas:
-            for s_alpha in csc_alphas:
-                for n_alpha in neighbor_alphas:
+        for c_alpha in causal_grid:
+            for s_alpha in csc_grid:
+                for n_alpha in neighbor_grid:
                     counter += 1
-                    if counter % 20 == 0 or counter == 1:
-                        self.logger.info(f"  扫描进度: [{counter}/{total}]")
+                    if counter % 20 == 0 or counter == 1 or counter == total:
+                        self.logger.info(f"  [{tag}] 进度: [{counter}/{total}]")
 
                     metrics = self._test(test_left, test_right, last_epoch=False, save_name="",
                                         override_causal_alpha=c_alpha,
@@ -488,47 +972,7 @@ class Runner:
                             'hits10': float(metrics['hits10_l2r']),
                             'mrr': float(metrics['mrr_l2r']),
                         })
-
-        # ====== 按 Hits@1 排序 ======
-        results_sorted = sorted(results, key=lambda x: x['hits1'], reverse=True)
-
-        # ====== 打印排行榜 ======
-        self.logger.info("\n" + "=" * 90)
-        self.logger.info("🏆 α 扫描结果排行榜 (按 Hits@1 排序)")
-        self.logger.info("=" * 90)
-        self.logger.info(f"{'排名':<6}{'causal_α':<12}{'csc_α':<10}{'neighbor_α':<14}{'Hits@1':<10}{'Hits@10':<10}{'MRR':<10}")
-        self.logger.info("-" * 90)
-        for i, r in enumerate(results_sorted[:20]):
-            marker = "⭐" if i == 0 else "  "
-            self.logger.info(f"{marker} {i+1:<4}{r['causal_alpha']:<12}{r['csc_alpha']:<10}"
-                            f"{r['neighbor_alpha']:<14}{r['hits1']:<10.4f}{r['hits10']:<10.4f}{r['mrr']:<10.4f}")
-        self.logger.info("=" * 90)
-
-        best = results_sorted[0]
-        self.logger.info(f"\n🎯 最优组合: causal_α={best['causal_alpha']}, csc_α={best['csc_alpha']}, neighbor_α={best['neighbor_alpha']}")
-        self.logger.info(f"   Hits@1={best['hits1']:.4f}, Hits@10={best['hits10']:.4f}, MRR={best['mrr']:.4f}")
-
-        # ====== 保存结果到 JSON 和 CSV ======
-        save_dir = osp.join(self.args.data_path, 'sweep_results')
-        os.makedirs(save_dir, exist_ok=True)
-
-        exp_tag = f"{self.args.data_choice}_{self.args.data_split}_{self.args.data_rate}"
-
-        json_path = osp.join(save_dir, f'sweep_{exp_tag}.json')
-        with open(json_path, 'w') as f:
-            json.dump(results_sorted, f, indent=2)
-
-        csv_path = osp.join(save_dir, f'sweep_{exp_tag}.csv')
-        with open(csv_path, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=['causal_alpha', 'csc_alpha', 'neighbor_alpha', 'hits1', 'hits10', 'mrr'])
-            writer.writeheader()
-            writer.writerows(results_sorted)
-
-        self.logger.info(f"💾 结果保存到: {json_path}")
-        self.logger.info(f"💾 CSV 保存到: {csv_path}")
-
-        # ====== 生成热力图 ======
-        self._plot_sweep_heatmaps(results, save_dir, exp_tag, best)
+        return results
 
     def _plot_sweep_heatmaps(self, results, save_dir, exp_tag, best):
         """生成三组热力图：固定一个参数，看另外两个参数的影响"""
@@ -690,9 +1134,9 @@ class Runner:
         self.logger.info(" --------------------- Test result --------------------- ")
         self._test(test_left, test_right, last_epoch=last_epoch, save_name=save_name)
 
-
     def _test(self, test_left, test_right, last_epoch=False, save_name="", loss=None,
-          override_causal_alpha=None, override_csc_alpha=None, override_neighbor_alpha=None):
+          override_causal_alpha=None, override_csc_alpha=None, override_neighbor_alpha=None,
+          override_bidir_lambda=None):
         with torch.no_grad():
             w_normalized = None
             if self.args.model_name in ["MEAformer"]:
@@ -837,11 +1281,41 @@ class Runner:
         # ====================================================================
         
         if self.args.csls is True:
-            distance = 1 - csls_sim(1 - distance, self.args.csls_k)
+            csls_iter = getattr(self.args, 'csls_iter', 1)
+            for _ in range(csls_iter):
+                distance = 1 - csls_sim(1 - distance, self.args.csls_k)
         
-        if self.args.csls is True:
-            distance = 1 - csls_sim(1 - distance, self.args.csls_k)
-        
+        # ====================================================================
+        # ====== A1: 双向一致性过滤（Bidirectional Consistency Filter）======
+        # 思想：对每个候选对 (i, j)，检查 i 在 j 反向搜索中的排名
+        #       如果反向排名很靠后，说明该匹配只是单向巧合，给予惩罚
+        # ====================================================================
+        if getattr(self.args, 'use_bidirectional_consistency', 0) == 1:
+            bidir_lambda = getattr(self.args, 'bidir_lambda', 0.1)
+            
+            with torch.no_grad():
+                # distance.shape = [N1, N2]
+                # 对每列 j，计算每行 i 在该列升序中的排名
+                # backward_order[k, j] = 排在第 k 位的行索引
+                backward_order = distance.argsort(dim=0)
+                
+                # 把 order 反转为 rank：rank_backward[i, j] = i 在第 j 列升序中的排名
+                rank_backward = torch.empty_like(backward_order, dtype=torch.float)
+                rank_range = torch.arange(
+                    distance.shape[0], device=distance.device, dtype=torch.float
+                ).unsqueeze(1).expand(-1, distance.shape[1])
+                rank_backward.scatter_(0, backward_order, rank_range)
+                
+                # 用 log(1+rank) 做软化惩罚，避免个别大排名主导
+                # 正确匹配时反向排名应该=0（i 就是 j 的 top-1），penalty=log(1)=0
+                penalty = torch.log1p(rank_backward)
+                
+                distance = distance + bidir_lambda * penalty
+            
+            self.logger.info(f"[Bidirectional Consistency] applied: lambda={bidir_lambda}")
+        # ====================================================================
+
+
         # ... 后面不变 ...
         if last_epoch:
             to_write = []
@@ -946,7 +1420,7 @@ class Runner:
 
         if len(model_name) > 0 and not os.path.exists(save_path):
             print(f"not exists {model_name} !! ")
-            pdb.set_trace()
+            self.logger.info(f"not exists {model_name}.pkl, will random init for first training run.")
         if (len(model_name) == 0 or not os.path.exists(save_path)) and self.rank == 0:
             if len(model_name) > 0:
                 self.logger.info(f"📂 [LOAD MODEL] ⚠️  {model_name}.pkl not exist, falling back to random init")
@@ -1148,16 +1622,16 @@ if __name__ == '__main__':
             logger.info(f"🎯 [RUN MODE] TRAINING — 将从头/checkpoint 训练")
             logger.info(f"🎯 [RUN MODE] save_model flag = {getattr(cfgs, 'save_model', 0)}")
             logger.info(f"🎯 [RUN MODE] 加载起点 checkpoint = '{cfgs.model_name_save}' (空则随机初始化)")
-        logger.info(f"🎯 [RUN MODE] do_alpha_sweep = {getattr(cfgs, 'do_alpha_sweep', 0)}")
+        logger.info(f"🎯 [RUN MODE] do_csls_iter_sweep        = {getattr(cfgs, 'do_csls_iter_sweep', 0)}")
+        logger.info(f"🎯 [RUN MODE] do_csls_iter_sanity_check = {getattr(cfgs, 'do_csls_iter_sanity_check', 0)}")
+        logger.info(f"🎯 [RUN MODE] do_alpha_sweep            = {getattr(cfgs, 'do_alpha_sweep', 0)}")
         logger.info("=" * 60)
     # =================================
     runner = Runner(cfgs, writer, logger, rank)
     if cfgs.only_test:
         runner.test(last_epoch=False)
-        # 新增：only_test 模式下也触发 α 扫描
-        # ====== 新增：only_test 模式下也支持 α 扫描 ======
-        if getattr(cfgs, 'do_alpha_sweep', 0) == 1 and rank == 0:
-            runner.logger.info("\n\n🔍 [only_test] 触发 α 扫描...")
+        # ====== only_test 模式下支持三种扫描 ======
+        if rank == 0:
             runner.model.eval()
             if runner.test_set is not None:
                 test_left = runner.test_left
@@ -1165,14 +1639,17 @@ if __name__ == '__main__':
             else:
                 test_left = runner.eval_left
                 test_right = runner.eval_right
-            runner.alpha_sweep(test_left, test_right)
-        # =================================================
-        # if getattr(cfgs, 'do_alpha_sweep', 0) == 1:
-        #     runner.logger.info("\n\n🔍 only_test 模式，开始 α 扫描...")
-        #     runner.model.eval()
-        #     test_left = runner.test_left if runner.test_set is not None else runner.eval_left
-        #     test_right = runner.test_right if runner.test_set is not None else runner.eval_right
-        #     runner.alpha_sweep(test_left, test_right)
+
+            # 优先级：csls_iter 联合扫描 > 验证 1 (sanity check) > 单次 α 扫描
+            if getattr(cfgs, 'do_csls_iter_sweep', 0) == 1:
+                runner.logger.info("\n\n🔍 [only_test] 触发 csls_iter × α 联合扫描...")
+                runner.csls_iter_and_alpha_sweep(test_left, test_right)
+            elif getattr(cfgs, 'do_csls_iter_sanity_check', 0) == 1:
+                runner.logger.info("\n\n🔍 [only_test] 触发验证 1 (sanity check) — 固定 α 扫 csls_iter...")
+                runner.csls_iter_sanity_check(test_left, test_right)
+            elif getattr(cfgs, 'do_alpha_sweep', 0) == 1:
+                runner.logger.info("\n\n🔍 [only_test] 触发 α 扫描...")
+                runner.alpha_sweep(test_left, test_right)
     else:
         runner.run()
 
