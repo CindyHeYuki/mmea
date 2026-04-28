@@ -1225,13 +1225,14 @@ class Runner:
                 # 后面的 ranking 和指标计算直接复用下面的代码块 —— 跳到 top_k 那段
                 # 用 goto-like 的 flag 控制:
                 _skip_fusion = True
+                
             else:
                 _skip_fusion = False
             # =====================================================
-            if not _skip_fusion and self.args.model_name in ["MEAformer"]:
+            if _skip_fusion:
+                pass
+            elif self.args.model_name in ["MEAformer"]:
                 final_emb, weight_norm = self.model.joint_emb_generat()
-                
-                # ====== 新增：获取各模态独立 embedding，供推理时融合使用 ======
                 need_modal_embs = (getattr(self.args, 'use_causal_bias', 0) == 1) or \
                                 (getattr(self.args, 'use_csc', 0) == 1)
                 if need_modal_embs:
@@ -1239,13 +1240,15 @@ class Runner:
                         self.model.joint_emb_generat(only_joint=False)
                 else:
                     gph_emb = img_emb = rel_emb = att_emb = name_emb = char_emb = None
-                # ============================================================
+                self.logger.info(f"DEBUG: _skip_fusion={_skip_fusion}, model_name={self.args.model_name!r}, type(final_emb)={type(final_emb)}")
+                final_emb = F.normalize(final_emb)    # ← 挪进来,只对非消融路径 normalize
             else:
+                # 非 MEAformer baseline 路径
                 final_emb = self.model.joint_emb_generat()
                 weight_norm = None
                 gph_emb = img_emb = rel_emb = att_emb = name_emb = char_emb = None
-            final_emb = F.normalize(final_emb)
-
+                final_emb = F.normalize(final_emb)
+            
 
             # ====== 模块三：推理时反事实融合 ======
             cf_emb = None

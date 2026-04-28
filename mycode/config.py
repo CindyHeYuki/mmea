@@ -106,8 +106,8 @@ class cfg():
 
         # 👇 添加下面这行 👇 
         # ====== 新增：单模态消融反事实实验 ======
-        parser.add_argument("--ablate_modal", default="none", type=str, 
-                            choices=["none", "img", "gph", "rel", "att", "name", "char", "uniform"],
+        parser.add_argument("--ablate_modal", default=None, type=str, 
+                            choices=[ "img", "gph", "rel", "att", "name", "char", "uniform"],
                             help="推理阶段单模态消融开关。none:正常运行, uniform:均匀融合, 或输入指定模态名进行消融")
         # =================================================
 
