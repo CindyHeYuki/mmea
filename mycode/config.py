@@ -75,12 +75,16 @@ class cfg():
 
         parser.add_argument("--do_alpha_sweep", default=0, type=int, choices=[0, 1],
                     help="是否在最后一次评估时进行 α 扫描")
-        parser.add_argument('--do_csls_iter_sweep', type=int, default=0,
+        parser.add_argument('--do_csls_iter_sweep', type=int, default=0, choices=[0, 1],
                     help='是否触发 csls_iter × α 联合扫描（外层 iter, 内层 α 两阶段）')
         parser.add_argument('--do_csls_iter_sanity_check', type=int, default=0,
                             help='验证 1：固定 α 只扫 csls_iter')
-        parser.add_argument('--csls_iter_sweep_list', type=int, nargs='+', default=None,
-                            help='csls_iter 扫描列表，如 --csls_iter_sweep_list 2 3 4 5 6 7 8 9 10')
+        
+        parser.add_argument("--csls_iter_sweep_list", default=[1, 2, 3, 5, 8, 11, 13, 15, 17, 19, 21, 23, 25],
+                            type=int, nargs='+',
+                            help="联合扫描时要扫的 csls_iter 列表。默认包含论文 FB 最优(17)和 FBYG 最优(11)")
+        parser.add_argument("--csls_iter", default=1, type=int,
+                            help="单次推理时使用的 csls 迭代次数")
         
         
         parser.add_argument('--sanity_causal_alpha', type=float, default=0.15,
@@ -166,7 +170,7 @@ class cfg():
         parser.add_argument("--distance", type=int, default=2, help="L1 distance or L2 distance. ('1', '2')", choices=[1, 2])
         parser.add_argument("--csls", action="store_true", default=False, help="use CSLS for inference")
         parser.add_argument("--csls_k", type=int, default=10, help="top k for csls")
-        parser.add_argument("--csls_iter", type=int, default=1, 
+        parser.add_argument("--csls_iter_EVA", type=int, default=1, 
                             help="CSLS 迭代次数。稀疏图（如 YAGO）建议设 2 做更强 hub 正则化。")
         parser.add_argument("--il", action="store_true", default=False, help="Iterative learning?")
         parser.add_argument("--semi_learn_step", type=int, default=10, help="If IL, what's the update step?")
