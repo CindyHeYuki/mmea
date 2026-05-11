@@ -1,0 +1,47 @@
+% ==========================================
+% 叠加视角消融表
+% ==========================================
+\begin{table*}[!ht]
+\centering
+\small
+\caption{Ablation study (additive view). Hits@1 / Hits@10 / MRR (\%).}
+\label{tab:ablation_add}
+\begin{tabular}{lccccccccccccccccccccccccccc}
+\toprule
+Variant & \multicolumn{3}{c}{FBDB15K 20%} & \multicolumn{3}{c}{FBDB15K 50%} & \multicolumn{3}{c}{FBDB15K 80%} & \multicolumn{3}{c}{FBYG15K 20%} & \multicolumn{3}{c}{FBYG15K 50%} & \multicolumn{3}{c}{FBYG15K 80%} & \multicolumn{3}{c}{DBP15K zh-en} & \multicolumn{3}{c}{DBP15K ja-en} & \multicolumn{3}{c}{DBP15K fr-en} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}\cmidrule(lr){11-13}\cmidrule(lr){14-16}\cmidrule(lr){17-19}\cmidrule(lr){20-22}\cmidrule(lr){23-25}\cmidrule(lr){26-28}
+ & H@1 & H@10 & MRR & H@1 & H@10 & MRR & H@1 & H@10 & MRR & H@1 & H@10 & MRR & H@1 & H@10 & MRR & H@1 & H@10 & MRR & H@1 & H@10 & MRR & H@1 & H@10 & MRR & H@1 & H@10 & MRR \\
+\midrule
+Backbone & 37.56 & 67.38 & 47.70 & 55.89 & 80.55 & 64.80 & 69.42 & 88.83 & 76.40 & 29.82 & 54.24 & 38.20 & 50.98 & 75.32 & 59.60 & 66.25 & 85.85 & 73.40 & 71.02 & 92.50 & 78.80 & 70.89 & 93.23 & 78.90 & 71.19 & 93.93 & 79.40 \\
++ Sample Scheduling & 36.82 & 67.83 & 47.30 & 55.83 & 80.87 & 64.70 & 68.17 & 87.28 & 75.10 & 26.42 & 52.78 & 35.40 & 50.55 & 75.05 & 59.30 & 65.76 & 85.89 & 73.00 & 69.14 & 91.74 & 77.20 & 70.11 & 93.50 & 78.50 & 69.95 & 93.66 & 78.30 \\
++ Differentiated Aggregation & 41.60 & 71.74 & 51.80 & 59.43 & 83.43 & 67.90 & 73.31 & 90.54 & 79.60 & 30.88 & 57.72 & 40.10 & 54.95 & 78.21 & 63.30 & 69.64 & 88.04 & 76.30 & 69.37 & 91.82 & 77.40 & 70.11 & 93.50 & 78.50 & 69.95 & 93.66 & 78.30 \\
++ Counterfactual Consistency & 41.09 & 71.30 & 51.40 & 58.91 & 82.61 & 67.40 & 72.41 & 89.73 & 78.90 & 30.59 & 57.06 & 39.60 & 54.14 & 77.71 & 62.60 & 69.24 & 87.86 & 75.90 & 69.34 & 91.83 & 77.40 & 70.04 & 93.42 & 78.40 & 69.87 & 93.60 & 78.20 \\
++ Topology-Consistent Repr & 42.33 & 70.22 & 51.80 & 58.42 & 81.32 & 66.30 & 69.81 & 87.78 & 76.40 & 33.16 & 57.44 & 41.50 & 52.70 & 74.84 & 60.40 & 65.71 & 83.30 & 72.10 & 73.76 & 93.65 & 80.80 & 73.26 & 93.90 & 80.80 & 74.08 & 95.11 & 81.60 \\
+\textbf{Full Model } & \textbf{ 57.72 } & \textbf{ 79.69 } & \textbf{ 65.20 } & \textbf{ 71.87 } & \textbf{ 87.56 } & \textbf{ 77.60 } & \textbf{ 81.98 } & \textbf{ 92.88 } & \textbf{ 86.10 } & \textbf{ 45.62 } & \textbf{ 66.24 } & \textbf{ 52.70 } & \textbf{ 65.16 } & \textbf{ 81.36 } & \textbf{ 70.90 } & \textbf{ 75.49 } & \textbf{ 89.15 } & \textbf{ 80.50 } & \textbf{ 85.29 } & \textbf{ 96.86 } & \textbf{ 89.60 } & \textbf{ 85.07 } & \textbf{ 97.55 } & \textbf{ 89.80 } & \textbf{ 86.66 } & \textbf{ 98.34 } & \textbf{ 91.00} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+% ==========================================
+% 移除视角消融表
+% ==========================================
+\begin{table*}[!ht]
+\centering
+\small
+\caption{Ablation study (leave-one-out view). Hits@1 / Hits@10 / MRR (\%).}
+\label{tab:ablation_loo}
+\begin{tabular}{lccccccccccccccccccccccccccc}
+\toprule
+Variant & \multicolumn{3}{c}{FBDB15K 20%} & \multicolumn{3}{c}{FBDB15K 50%} & \multicolumn{3}{c}{FBDB15K 80%} & \multicolumn{3}{c}{FBYG15K 20%} & \multicolumn{3}{c}{FBYG15K 50%} & \multicolumn{3}{c}{FBYG15K 80%} & \multicolumn{3}{c}{DBP15K zh-en} & \multicolumn{3}{c}{DBP15K ja-en} & \multicolumn{3}{c}{DBP15K fr-en} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}\cmidrule(lr){11-13}\cmidrule(lr){14-16}\cmidrule(lr){17-19}\cmidrule(lr){20-22}\cmidrule(lr){23-25}\cmidrule(lr){26-28}
+ & H@1 & H@10 & MRR & H@1 & H@10 & MRR & H@1 & H@10 & MRR & H@1 & H@10 & MRR & H@1 & H@10 & MRR & H@1 & H@10 & MRR & H@1 & H@10 & MRR & H@1 & H@10 & MRR & H@1 & H@10 & MRR \\
+\midrule
+Full Model & 57.72 & 79.69 & 65.20 & 71.87 & 87.56 & 77.60 & 81.98 & 92.88 & 86.10 & 45.62 & 66.24 & 52.70 & 65.16 & 81.36 & 70.90 & 75.49 & 89.15 & 80.50 & 85.29 & 96.86 & 89.60 & 85.07 & 97.55 & 89.80 & 86.66 & 98.34 & 91.00 \\
+w/o Sample Scheduling & 55.33 & 78.79 & 63.40 & 70.73 & 87.19 & 76.50 & 80.43 & 92.72 & 85.00 & 44.60 & 65.70 & 52.00 & 64.20 & 80.54 & 69.90 & 74.38 & 88.66 & 79.60 & 84.35 & 96.30 & 88.70 & 84.27 & 97.35 & 89.10 & 85.99 & 98.23 & 90.60 \\
+w/o Differentiated Aggregation & 55.82 & 78.52 & 63.70 & 69.80 & 86.56 & 75.80 & 78.91 & 90.70 & 83.30 & 43.74 & 64.53 & 51.00 & 63.30 & 79.18 & 69.00 & 73.44 & 87.37 & 78.40 & 85.19 & 96.88 & 89.50 & 85.07 & 97.55 & 89.80 & 86.66 & 98.34 & 91.00 \\
+w/o Counterfactual Consistency & 55.17 & 76.83 & 62.70 & 70.15 & 85.88 & 75.80 & 79.77 & 91.32 & 84.20 & 44.82 & 64.82 & 51.60 & 64.07 & 79.71 & 69.70 & 73.71 & 87.59 & 78.90 & 85.16 & 96.81 & 89.50 & 84.73 & 97.35 & 89.40 & 86.39 & 98.23 & 90.80 \\
+w/o Topology-Consistent Repr & 52.35 & 77.59 & 61.20 & 69.83 & 87.36 & 76.20 & 82.26 & 94.09 & 86.70 & 36.52 & 61.99 & 45.20 & 62.09 & 82.25 & 69.10 & 76.29 & 90.80 & 81.60 & 80.27 & 95.87 & 85.90 & 80.64 & 96.78 & 86.70 & 81.29 & 97.28 & 87.10 \\
+w/o Similarity Refinement & 42.33 & 70.22 & 51.80 & 58.42 & 81.32 & 66.30 & 69.81 & 87.78 & 76.40 & 33.16 & 57.44 & 41.50 & 52.70 & 74.84 & 60.40 & 65.71 & 83.30 & 72.10 & 73.76 & 93.65 & 80.80 & 73.26 & 93.90 & 80.80 & 74.08 & 95.11 & 81.60 \\
+\bottomrule
+\end{tabular}
+\end{table*}

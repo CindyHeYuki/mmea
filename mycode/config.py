@@ -41,6 +41,7 @@ class cfg():
                     help="结构稀疏度权重（0-1），用于计算样本难度：λ·ρ_struct + (1-λ)·ρ_modal")
         parser.add_argument("--use_sample_schedule", default=1, type=int, choices=[0, 1],
                     help="消融实验开关：是否启用样本调度 (1: 开启, 0: 关闭)")
+
         # ====== B3: 三维难度度量参数 ======
         parser.add_argument("--use_3d_difficulty", default=0, type=int, choices=[0, 1],
                     help="是否启用三维难度度量（B3）。0=只用旧的二维 lambda_val 公式")
@@ -52,6 +53,7 @@ class cfg():
                             help="难度计算中名称非独特性的权重 (建议 0.2-0.4)")
         # ===================================
         # ===================================================
+
 
         # ====== 新增：模块二 动态因果效应加权机制参数 ======
         parser.add_argument("--use_causal_bias", default=1, type=int, choices=[0, 1],
@@ -86,6 +88,18 @@ class cfg():
         parser.add_argument("--csls_iter", default=1, type=int,
                             help="单次推理时使用的 csls 迭代次数")
         
+        # ====== 新增 1：样本调度的 sigmoid 中点 p_0（§3.3.1）======
+        parser.add_argument("--p0", default=0.5, type=float,
+                    help="样本调度 sigmoid 的中点 p_0（论文 §3.3.1 公式 5）")
+
+        # ====== 新增 2：因果聚合的 softmax 温度 τ_C（§3.3.2）======
+        parser.add_argument("--tau_C", default=1.0, type=float,
+                    help="C_m 派生权重的 softmax 温度 τ_C（论文 §3.3.2 公式 8a）")
+
+        # ====== 新增 3：因果聚合的软下界 ε（§3.3.2）======
+        parser.add_argument("--epsilon_floor", default=0.01, type=float,
+                    help="C_m 派生权重的软下界 ε（论文 §3.3.2 公式 8a）")
+        
         
         parser.add_argument('--sanity_causal_alpha', type=float, default=0.15,
                     help='验证 1 专用：固定的 causal_alpha')
@@ -118,7 +132,7 @@ class cfg():
 
         # ====== 新增：预训练语言模型 (PLM) 模块参数 ======
         # ====== PLM 全能控制模块 ======
-        parser.add_argument("--use_plm", default=1, type=int, choices=[0, 1], 
+        parser.add_argument("--use_plm", default=0, type=int, choices=[0, 1], 
                             help="是否启用PLM来替代传统的GloVe名称特征 (1: 开启, 0: 关闭)")
         parser.add_argument("--plm_name", default="bert-base-multilingual-cased", type=str, 
                             help="HuggingFace模型名称, 高度推荐用多语言模型, 支持 bert, roberta, xlm-roberta 等")
@@ -162,7 +176,7 @@ class cfg():
         parser.add_argument("--contrastive_loss", default=0, type=int, choices=[0, 1])
         parser.add_argument('--clip', type=float, default=1., help='gradient clipping')
 
-        # --------- EVA -----------
+        # # --------- EVA -----------
         parser.add_argument("--data_split", default="fr_en", type=str, help="Experiment split", choices=["dbp_wd_15k_V2", "dbp_wd_15k_V1", "zh_en", "ja_en", "fr_en", "norm"])
         parser.add_argument("--hidden_units", type=str, default="128,128,128", help="hidden units in each hidden layer(including in_dim and out_dim), splitted with comma")
         parser.add_argument("--dropout", type=float, default=0.0, help="dropout rate for layers")
@@ -170,8 +184,8 @@ class cfg():
         parser.add_argument("--distance", type=int, default=2, help="L1 distance or L2 distance. ('1', '2')", choices=[1, 2])
         parser.add_argument("--csls", action="store_true", default=False, help="use CSLS for inference")
         parser.add_argument("--csls_k", type=int, default=10, help="top k for csls")
-        parser.add_argument("--csls_iter_EVA", type=int, default=1, 
-                            help="CSLS 迭代次数。稀疏图（如 YAGO）建议设 2 做更强 hub 正则化。")
+        # parser.add_argument("--csls_iter_EVA", type=int, default=1, 
+        #                     help="CSLS 迭代次数。稀疏图（如 YAGO）建议设 2 做更强 hub 正则化。")
         parser.add_argument("--il", action="store_true", default=False, help="Iterative learning?")
         parser.add_argument("--semi_learn_step", type=int, default=10, help="If IL, what's the update step?")
         parser.add_argument("--il_start", type=int, default=500, help="If Il, when to start?")

@@ -228,7 +228,8 @@ class MEAformer(nn.Module):
             # 在 forward() 的样本调度部分
             if self.args.use_sample_schedule == 1 and self.training:
                 progress = epoch / total_epochs
-                threshold = 1.0 / (1.0 + math.exp(-self.args.k * (progress - 0.5)))
+                threshold = 1.0 / (1.0 + math.exp(-self.args.k * (progress - self.args.p0)))
+                # threshold = 1.0 / (1.0 + math.exp(-self.args.k * (progress - 0.5)))
                 
                 # 软权重计算（保留）
                 sample_weights = torch.exp(-(difficulties - threshold).clamp(min=0))

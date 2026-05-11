@@ -1331,18 +1331,32 @@ class Runner:
                 if m_emb is None:
                     continue
                 Cj = causal_Cj.get(m_name, 0.0)
-                # 只使用置信度超过阈值的模态（过滤掉单独没用的模态）
-                if Cj < 0.05:
-                    continue
+                Cj = max(Cj, 1e-4)
+                # # 只使用置信度超过阈值的模态（过滤掉单独没用的模态）
+                # if Cj < 0.05:
+                #     continue
                 m_emb_norm = F.normalize(m_emb)
                 m_dist = pairwise_distances(m_emb_norm[test_left], m_emb_norm[test_right])
                 modal_distances.append(m_dist)
                 modal_weights.append(Cj)
             
             if len(modal_distances) > 0:
-                # 归一化权重
-                weights_sum = sum(modal_weights)
-                modal_weights = [w / weights_sum for w in modal_weights]
+                # === 用 τ_C 控温 + ε 软下界（论文 §3.3.2 公式 8a）===
+                import math
+                tau_C = getattr(self.args, 'tau_C', 1.0)
+                epsilon_floor = getattr(self.args, 'epsilon_floor', 0.01)
+
+                # 1) softmax-with-temperature
+                exp_w = [math.exp(w / tau_C) for w in modal_weights]
+                exp_sum = sum(exp_w)
+                modal_weights = [e / exp_sum for e in exp_w]
+
+                # 2) 软下界混合
+                M = len(modal_weights)
+                modal_weights = [(1 - epsilon_floor) * w + epsilon_floor / M for w in modal_weights]
+                # # 归一化权重
+                # weights_sum = sum(modal_weights)
+                # modal_weights = [w / weights_sum for w in modal_weights]
                 # 加权融合单模态距离，作为"因果置信距离"
                 causal_distance = sum(w * d for w, d in zip(modal_weights, modal_distances))
                 # 与 joint 距离融合

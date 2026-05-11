@@ -1,0 +1,7 @@
+# dataset rate ckpt_filename log_path
+# generated at 2026年 05月 11日 星期一 15:05:14 CST
+FBDB15K 0.05 rate_0.05_ low_resource_FBDB15K_0.05_train.log
+FBDB15K 0.1 rate_0.1_ low_resource_FBDB15K_0.1_train.log
+FBDB15K 0.15 rate_0.15_ low_resource_FBDB15K_0.15_train.log
+FBDB15K 0.2 rate_0.2_ low_resource_FBDB15K_0.2_train.log
+FBDB15K 0.25 rate_0.25_ low_resource_FBDB15K_0.25_train.log
