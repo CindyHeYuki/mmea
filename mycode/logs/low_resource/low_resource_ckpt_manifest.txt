@@ -1,0 +1,14 @@
+# dataset rate ckpt_filename log_path
+# generated at 2026年 05月 12日 星期二 13:48:36 CST
+FBDB15K 0.05 FBDB15K_0.05_ low_resource_FBDB15K_0.05_train.log
+FBDB15K 0.1 FBDB15K_0.1_ low_resource_FBDB15K_0.1_train.log
+FBDB15K 0.15 FBDB15K_0.15_ low_resource_FBDB15K_0.15_train.log
+FBDB15K 0.2 FBDB15K_0.2_ low_resource_FBDB15K_0.2_train.log
+FBDB15K 0.25 FBDB15K_0.25_ low_resource_FBDB15K_0.25_train.log
+FBDB15K 0.3 FBDB15K_0.3_ low_resource_FBDB15K_0.3_train.log
+FBYG15K 0.05 FBYG15K_rate_0.05_ low_resource_FBYG15K_0.05_train.log
+FBYG15K 0.1 FBYG15K_rate_0.1_ low_resource_FBYG15K_0.1_train.log
+FBYG15K 0.15 FBYG15K_rate_0.15_ low_resource_FBYG15K_0.15_train.log
+FBYG15K 0.2 FBYG15K_rate_0.2_ low_resource_FBYG15K_0.2_train.log
+FBYG15K 0.25 FBYG15K_rate_0.25_ low_resource_FBYG15K_0.25_train.log
+FBYG15K 0.3 FBYG15K_rate_0.3_ low_resource_FBYG15K_0.3_train.log
