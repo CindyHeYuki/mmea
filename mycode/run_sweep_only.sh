@@ -94,7 +94,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python main.py \
             --use_bidirectional_consistency 0 \
             --bidir_lambda 0.05 \
             --do_csls_iter_sweep 1 \
-            --csls_iter_sweep_list 2 3 4 5 6 7 8 9 10 \
+            --csls_iter_sweep_list 2 3 4 5 6 7 8 9 10 11 12 13 14 15 \
             --do_csls_iter_sanity_check 0 \
             --sanity_causal_alpha 0.15 \
             --sanity_csc_alpha 0.125 \

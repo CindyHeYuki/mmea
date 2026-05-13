@@ -178,5 +178,35 @@
     "checkpoint": "FBYG15K_norm_0.5_il_il500_b500_",
     "run_date": "2026-04-27 19:02:00",
     "notes": "two-stage sweep, 45 coarse + 168 fine"
+  },
+  "FBDB15K_norm_0.05_surface0": {
+    "best_alpha": {
+      "causal_alpha": 0.15,
+      "csc_alpha": 0.0,
+      "neighbor_alpha": 0.65
+    },
+    "best_metrics": {
+      "hits1": 0.2587999999523163,
+      "hits10": 0.5092999935150146,
+      "mrr": 0.3426376940604989
+    },
+    "checkpoint": "FBDB15K_0.05_",
+    "run_date": "2026-05-13 19:17:50",
+    "notes": "two-stage sweep, 36 coarse + 140 fine"
+  },
+  "FBDB15K_norm_0.1_surface0": {
+    "best_alpha": {
+      "causal_alpha": 0.2,
+      "csc_alpha": 0.0,
+      "neighbor_alpha": 0.675
+    },
+    "best_metrics": {
+      "hits1": 0.40709999203681946,
+      "hits10": 0.671999990940094,
+      "mrr": 0.4970014479215963
+    },
+    "checkpoint": "FBDB15K_0.1_",
+    "run_date": "2026-05-13 22:33:57",
+    "notes": "two-stage sweep, 36 coarse + 112 fine"
   }
 }
