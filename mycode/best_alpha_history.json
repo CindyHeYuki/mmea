@@ -91,18 +91,18 @@
   },
   "DBP15K_zh_en_0.3_surface0": {
     "best_alpha": {
-      "causal_alpha": 0.025,
-      "csc_alpha": 0.2,
-      "neighbor_alpha": 0.675
+      "causal_alpha": 0.275,
+      "csc_alpha": 0.15,
+      "neighbor_alpha": 0.65
     },
     "best_metrics": {
-      "hits1": 0.8720999956130981,
-      "hits10": 0.9760000109672546,
-      "mrr": 0.9108639831432733
+      "hits1": 0.8952000141143799,
+      "hits10": 0.9829999804496765,
+      "mrr": 0.9284422249877728
     },
-    "checkpoint": "v1_zh_en_0.3_il_il500_b500_",
-    "run_date": "2026-04-27 13:16:46",
-    "notes": "two-stage sweep, 45 coarse + 112 fine"
+    "checkpoint": "v2_dbp_zh_wo_surf_seed1_",
+    "run_date": "2026-05-17 15:04:29",
+    "notes": "two-stage sweep, 48 coarse + 245 fine"
   },
   "DBP15K_ja_en_0.3_surface0": {
     "best_alpha": {

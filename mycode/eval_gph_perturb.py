@@ -303,9 +303,12 @@ def main(a):
     # FBYG15K:  /data0/hwx/mmea_copy/data/mmkg/MEAformer/save/FBYG15K_rate_0.2_.pkl
     # DBP15K:   /data0/hwx/mmea_copy/data/mmkg/MEAformer/save/v2_dbp_zh_wo_surf_seed1_.pkl
     # ============================================
-    ckpt_path = "/data0/hwx/mmea_copy/data/mmkg/MEAformer/save/FBDB15K_0.2_.pkl"
+    ckpt_path = "/data0/hwx/mmea_copy/data/mmkg/MEAformer/save/v2_dbp_zh_wo_surf_seed1_.pkl"
     cj_path = ckpt_path.replace('.pkl', '_cj.json')
     print(f"[main] ckpt_path: {ckpt_path}")
+
+    args.csls_iter = a.csls_iter
+
 
     model = load_model(KGs, args, ckpt_path, cj_path)
 
